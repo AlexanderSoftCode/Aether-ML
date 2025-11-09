@@ -4,8 +4,9 @@ from numpy.lib.stride_tricks import as_strided
 class Conv_Layer:
     def __init__(self, input_shape, num_filters = 1, filter_size = (3, 3), strides = (1, 1), padding = "same"):
 
-        #input_shape has form (batch_size, height, width, channels)
-        self.input_shape = input_shape
+        #input_shape has form (height, width, channels) 
+        #where batch size would be accounted for in the forward and backwards passes
+        self.input_shape = input_shape 
         self.num_filters = num_filters
         self.filter_size = filter_size
         self.strides = strides
@@ -279,6 +280,24 @@ class Layer_Dropout:
     def backward(self, dvalues):
         self.dinputs = dvalues * self.binary_mask 
 
+class Layer_Dropout_Spatial: 
+    def __init__(self, rate):
+        
+        self.rate = rate
+        self.keep_prob = 1 - rate
+    def forward(self, inputs, training):
+        self.inputs = inputs
+
+        if not training:
+            self.output = inputs.copy()
+            return
+        C = self.inputs.shape[-1]
+        self.channel_mask = np.random.binomial(1, self.keep_prob, size = (1, 1, 1, C)) \
+                            / self.keep_prob
+        self.output = inputs * self.channel_mask
+
+    def backward(self, dvalues): 
+        self.dinputs = dvalues * self.binary_mask
 class ReLU:
     def forward(self, inputs, training):
         self.inputs = inputs
