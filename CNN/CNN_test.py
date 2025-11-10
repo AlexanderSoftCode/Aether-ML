@@ -25,21 +25,31 @@ X_test = (X_test.astype(np.float32) - 127.5) / 127.5
 model = Model()
 
 #Add the first convolutional block
-model.add(Conv_Layer(input_shape = (128, 28, 28, 1), num_filters= 8, filter_size= (3, 3), strides= (1, 1),
+model.add(Conv_Layer(input_shape = (28, 28, 1), num_filters= 8, filter_size= (3, 3), strides= (1, 1),
                      padding= "same"))
 model.add(ReLU())
+model.add(Layer_Dropout_Spatial(rate = 0.2))
 model.add(Pooling(filter_size= (2,2), strides = (2,2), padding = "valid", pooling_type= "max"))
 
 #Add the second convolutional block
-model.add(Conv_Layer(input_shape = (128, 14, 14, 8), num_filters= 16, filter_size= (3, 3), strides= (1, 1),
+model.add(Conv_Layer(input_shape = (14, 14, 8), num_filters= 16, filter_size= (3, 3), strides= (1, 1),
                      padding= "same"))
 model.add(ReLU())
+model.add(Layer_Dropout_Spatial(rate = 0.15))
 model.add(Pooling(filter_size= (2,2), strides = (2,2), padding = "valid", pooling_type= "max"))
+
+#Add a final convolutional block
+model.add(Conv_Layer(input_shape= (7, 7, 16), num_filters = 32, filter_size= (3, 3), strides = (1, 1),
+                     padding = "same"))
+model.add(ReLU())
+model.add(Layer_Dropout_Spatial(rate = 0.2))
+model.add(Pooling(filter_size= (2, 2), strides = (2, 2), padding = "valid", pooling_type = "average"))
 
 #Flatten and use dense layers
 model.add((Flatten()))
-model.add(Layer_Dense(7 * 7 * 16, n_neurons= 256, weight_regularizer_l2= 5e-4, bias_regularizer_l2= 5e-4))
+model.add(Layer_Dense(7 * 7 * 32, n_neurons= 256, weight_regularizer_l2= 5e-4, bias_regularizer_l2= 5e-4))
 model.add(Layer_Dense(256, 10))
+model.add(ReLU())
 model.add(SoftMax())
 '''
 class Conv_Layer:

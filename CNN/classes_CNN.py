@@ -123,6 +123,8 @@ class Conv_Layer:
             self.dinputs = padded_dinputs[:, :, :, :] 
         return self.dinputs
 
+import numpy as np
+from numpy.lib.stride_tricks import as_strided
 class Pooling: 
     def __init__(self, filter_size = (2, 2), strides = (2, 2),
                   padding = "valid", pooling_type = "max"):
@@ -131,7 +133,7 @@ class Pooling:
         self.padding = padding
         self.pooling_type = pooling_type
 
-    def forward(self, inputs, training):
+    def forward(self, inputs):
         #Inputs should be of shape (S, H_in, W_in, C = D_in) 
         if inputs.ndim != 4:
             raise ValueError(f"Expected a 4D tensor, got {inputs.ndim} instead.")
@@ -184,6 +186,9 @@ class Pooling:
             #(fH, fW) patch
             max_rows, max_cols = np.unravel_index(flat_indicies, (fH, fW)) 
             self.max_indicies = (max_rows, max_cols) 
+        
+        elif self.pooling_type == "average":
+            pooled = patches.mean(axis = (3, 4))
             
         #Store both of these for backprop
         self.inputs = inputs
@@ -197,22 +202,43 @@ class Pooling:
         S, H_out, W_out, C = dvalues.shape
         fH, fW = self.filter_size
         sH, sW = self.strides
-        max_rows, max_cols = self.max_indicies
         
-        s_idx = np.arange(S)[:, None, None, None]      # Shape: (S, 1, 1, 1)
-        h_idx = np.arange(H_out)[None, :, None, None]  # Shape: (1, H_out, 1, 1)
-        w_idx = np.arange(W_out)[None, None, :, None]  # Shape: (1, 1, W_out, 1)
-        c_idx = np.arange(C)[None, None, None, :]      # Shape: (1, 1, 1, C)
+        if self.pooling_type == "max":
+            max_rows, max_cols = self.max_indicies
+            
+            s_idx = np.arange(S)[:, None, None, None]      # Shape: (S, 1, 1, 1)
+            h_idx = np.arange(H_out)[None, :, None, None]  # Shape: (1, H_out, 1, 1)
+            w_idx = np.arange(W_out)[None, None, :, None]  # Shape: (1, 1, W_out, 1)
+            c_idx = np.arange(C)[None, None, None, :]      # Shape: (1, 1, 1, C)
+            
+            # Calculate where in the input each gradient should go
+            # Broadcasting creates arrays of shape (S, H_out, W_out, C)
+            input_h = h_idx * sH + max_rows  # h_idx broadcasts, max_rows is already (S, H_out, W_out, C)
+            input_w = w_idx * sW + max_cols
+            
+            # Accumulate gradients at the right positions
+            # np.add.at handles if multiple output positions map to same input position
+            np.add.at(self.dinputs, (s_idx, input_h, input_w, c_idx), dvalues / (fH * fW))
         
-        # Calculate where in the input each gradient should go
-        # Broadcasting creates arrays of shape (S, H_out, W_out, C)
-        input_h = h_idx * sH + max_rows  # h_idx broadcasts, max_rows is already (S, H_out, W_out, C)
-        input_w = w_idx * sW + max_cols
-        
-        # Accumulate gradients at the right positions
-        # np.add.at handles if multiple output positions map to same input position
-        np.add.at(self.dinputs, (s_idx, input_h, input_w, c_idx), dvalues)
+        elif self.pooling_type == "average":
+            patches = as_strided(
+            self.dinputs,
+            shape = (S, H_out, W_out, fH, fW, C), 
+            strides = (
+                self.dinputs.strides[0],      #step between samples
+                self.dinputs.strides[1] * sH, #step between rows
+                self.dinputs.strides[2] * sW, #step between columns
+                self.dinputs.strides[1],      #Move down 1 row inside patch
+                self.dinputs.strides[2],      #move right 1col inside patch
+                self.dinputs.strides[3],      #step between each channel
+            ),
+            writeable = True
+            )
+            
+            add_vals = dvalues[:, :, :, None, None, :] / (fH * fW)
+            np.add(patches, add_vals, out = patches) 
         return self.dinputs
+
 
 class Layer_Dense:
     def __init__(self, n_inputs, n_neurons, weight_regularizer_l1 = 0,
@@ -298,7 +324,9 @@ class Layer_Dropout_Spatial:
 
     def backward(self, dvalues): 
         self.dinputs = dvalues * self.binary_mask
+
 class ReLU:
+
     def forward(self, inputs, training):
         self.inputs = inputs
         self.output = np.maximum(0, inputs)
@@ -306,6 +334,18 @@ class ReLU:
     def backward(self, dvalues):
         self.dinputs = dvalues.copy()
         self.dinputs[self.inputs < 0] = 0 
+
+class Leaky_Relu:
+    def __init__(self, alpha = 0.01):
+        self.alpha = alpha
+    
+    def forward(self, inputs, training):
+        self.inputs = inputs
+        self.output = np.where(inputs > 0, inputs, self.alpha * inputs)
+
+    def backward(self, dvalues):
+        self.dinputs = dvalues.copy()
+        self.dinputs[self.inputs < 0] *= self.alpha
 
 class Flatten:
     def forward(self, inputs, training):
@@ -415,23 +455,23 @@ class Loss_CategoricalCrossEntropy(Loss):
         self.dinputs = self.dinputs / samples
 
 class Activation_Softmax_Loss_CategoricalCrossEntropy():
-#    def __init__(self):
-#        self.activation = SoftMax()
-#        self.loss = Loss_CategoricalCrossEntropy()
+    def __init__(self):
+        self.activation = SoftMax()
+        self.loss = Loss_CategoricalCrossEntropy()
 
     #y_true is the vector of correct class indices, one per sample.
     #dvalues is output of softmax layer shape(n_samples, n_classes)
-#    def forward(self, inputs, y_true):
-#        self.activation.forward(inputs)                 #call forward function of softmax
-#        self.output = self.activation.output            #take the output as output of forward
-#        return self.loss.calculate(self.output, y_true) #take the loss via the ouput of softmax versus true
+    def forward(self, inputs, y_true):
+        self.activation.forward(inputs)                 #call forward function of softmax
+        self.output = self.activation.output            #take the output as output of forward
+        return self.loss.calculate(self.output, y_true) #take the loss via the ouput of softmax versus true
     
     def backward(self, dvalues, y_true):
         samples = len(dvalues)                          #For the backward note the samples
         #If labels are one-hot encoded, 
         #turn them into discrete values
-#        if len(y_true.shape) == 2:                      #if dataset answers return one hot
-#            y_true = np.argmax(y_true, axis = 1)        #take the max of the rows
+        if len(y_true.shape) == 2:                      #if dataset answers return one hot
+            y_true = np.argmax(y_true, axis = 1)        #take the max of the rows
 
         self.dinputs = dvalues.copy() #copy 
         #subtracts 1 from the predicted probability of the correct class for each sample.
