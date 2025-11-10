@@ -57,7 +57,7 @@ class Conv_Layer:
                             constant_values = 0)
 
         #Create an output tensor of size (batch_size, H_out, W_out, C_out)
-        self.output = np.zeros((self.input_shape[0], H_out, W_out, self.num_filters))
+        self.output = np.zeros((S, H_out, W_out, self.num_filters))
 
         #create our sliding window
         self.patches = as_strided(
@@ -123,8 +123,6 @@ class Conv_Layer:
             self.dinputs = padded_dinputs[:, :, :, :] 
         return self.dinputs
 
-import numpy as np
-from numpy.lib.stride_tricks import as_strided
 class Pooling: 
     def __init__(self, filter_size = (2, 2), strides = (2, 2),
                   padding = "valid", pooling_type = "max"):
@@ -133,7 +131,7 @@ class Pooling:
         self.padding = padding
         self.pooling_type = pooling_type
 
-    def forward(self, inputs):
+    def forward(self, inputs, training):
         #Inputs should be of shape (S, H_in, W_in, C = D_in) 
         if inputs.ndim != 4:
             raise ValueError(f"Expected a 4D tensor, got {inputs.ndim} instead.")
@@ -218,7 +216,7 @@ class Pooling:
             
             # Accumulate gradients at the right positions
             # np.add.at handles if multiple output positions map to same input position
-            np.add.at(self.dinputs, (s_idx, input_h, input_w, c_idx), dvalues / (fH * fW))
+            np.add.at(self.dinputs, (s_idx, input_h, input_w, c_idx), dvalues)
         
         elif self.pooling_type == "average":
             patches = as_strided(
@@ -323,7 +321,7 @@ class Layer_Dropout_Spatial:
         self.output = inputs * self.channel_mask
 
     def backward(self, dvalues): 
-        self.dinputs = dvalues * self.binary_mask
+        self.dinputs = dvalues * self.channel_mask
 
 class ReLU:
 
@@ -335,7 +333,7 @@ class ReLU:
         self.dinputs = dvalues.copy()
         self.dinputs[self.inputs < 0] = 0 
 
-class Leaky_Relu:
+class Leaky_ReLU:
     def __init__(self, alpha = 0.01):
         self.alpha = alpha
     
