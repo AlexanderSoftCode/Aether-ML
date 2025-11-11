@@ -1,7 +1,7 @@
 import numpy as np
 import time 
 
-from model_CNN import *
+from CNN.Model.CNN_model import *
 print("Numpy version")
 #X, y, X_test, y_test = create_data_mnist('fashion_mnist_images')
 data = np.load("CodeTest/fashion_mnist_train.npz")

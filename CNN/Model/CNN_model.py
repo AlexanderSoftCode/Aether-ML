@@ -1,7 +1,7 @@
 #classes
 import copy
 import pickle
-from classes_CNN import * 
+from CNN.Model.CNN_classes import * 
 
 class Model:
 
