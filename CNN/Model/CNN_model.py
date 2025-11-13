@@ -191,6 +191,49 @@ class Model:
         #Class backward method going through all the objects in reverse order
         for layer in reversed(self.layers):
             layer.backward(layer.next.dinputs)
+            
+    def forward_debug(self, X):
+        print("Input:", X.shape)
+        for i, layer in enumerate(self.layers):
+            X = layer.forward(X, training=False)
+            print(f"After layer {i} ({layer.__class__.__name__}): {X.shape}")
+        return X
+
+    def backward_debug(self, X, y):
+        # Forward pass to set outputs
+        out = X
+        print("Forward pass:")
+        for i, layer in enumerate(self.layers):
+            out = layer.forward(out, training=True)
+            print(f"Layer {i} ({layer.__class__.__name__}) output: {out.shape}")
+
+        # Backward pass starting from loss
+        print("\nBackward pass:")
+        # If you have a combined SoftMax + Loss layer
+        if self.softmax_classifier_output is not None:
+            self.softmax_classifier_output.backward(out, y)
+            self.layers[-1].dinputs = self.softmax_classifier_output.dinputs
+
+            for i, layer in enumerate(reversed(self.layers[:-1])):
+                next_dinputs = layer.next.dinputs
+                layer.backward(next_dinputs)
+                print(f"Layer {-i-2} ({layer.__class__.__name__}) dinputs: {layer.dinputs.shape}")
+                if hasattr(layer, 'dweights'):
+                    print(f"             dweights: {layer.dweights.shape}")
+                if hasattr(layer, 'dbiases'):
+                    print(f"             dbiases: {layer.dbiases.shape}")
+
+        else:
+            # Separate loss backward
+            self.loss.backward(out, y)
+            for i, layer in enumerate(reversed(self.layers)):
+                next_dinputs = layer.next.dinputs
+                layer.backward(next_dinputs)
+                print(f"Layer {-i-1} ({layer.__class__.__name__}) dinputs: {layer.dinputs.shape}")
+                if hasattr(layer, 'dweights'):
+                    print(f"             dweights: {layer.dweights.shape}")
+                if hasattr(layer, 'dbiases'):
+                    print(f"             dbiases: {layer.dbiases.shape}")
 
     def evaluate(self, X_val, y_val, *, batch_size = None):
         validation_steps = 1

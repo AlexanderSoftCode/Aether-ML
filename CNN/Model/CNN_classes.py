@@ -79,7 +79,7 @@ class Conv_Layer:
 
         self.inputs = inputs
         self.padded_inputs = padded_inputs
-        return self.output.copy()
+        return self.output
         #save the output tensor using self. for backpropogation
 
     def backward(self, dvalues):
@@ -121,6 +121,7 @@ class Conv_Layer:
             self.dinputs = padded_dinputs[:, P:-P, P:-P, :] 
         else:
             self.dinputs = padded_dinputs[:, :, :, :] 
+
         return self.dinputs
 
 class Pooling: 
@@ -255,6 +256,8 @@ class Layer_Dense:
         self.inputs = inputs 
         self.output = np.dot(inputs, self.weights) + self.biases
 
+        return self.output
+    
     def backward(self, dvalues):
         self.dweights = np.dot(self.inputs.T, dvalues)
         self.dbiases = np.sum(dvalues, axis = 0, keepdims = True)
@@ -277,6 +280,8 @@ class Layer_Dense:
 
         #Gradient on values
         self.dinputs = np.dot(dvalues, self.weights.T)
+
+        self.dinputs
 
     def get_parameters(self):
         #pass We'll let Model call this function 
@@ -314,14 +319,18 @@ class Layer_Dropout_Spatial:
 
         if not training:
             self.output = inputs.copy()
-            return
+            return self.output
         C = self.inputs.shape[-1]
         self.channel_mask = np.random.binomial(1, self.keep_prob, size = (1, 1, 1, C)) \
                             / self.keep_prob
         self.output = inputs * self.channel_mask
 
+        return self.output
+    
     def backward(self, dvalues): 
         self.dinputs = dvalues * self.channel_mask
+
+        
 
 class ReLU:
 
@@ -329,6 +338,8 @@ class ReLU:
         self.inputs = inputs
         self.output = np.maximum(0, inputs)
 
+        return self.output
+    
     def backward(self, dvalues):
         self.dinputs = dvalues.copy()
         self.dinputs[self.inputs < 0] = 0 
@@ -340,11 +351,84 @@ class Leaky_ReLU:
     def forward(self, inputs, training):
         self.inputs = inputs
         self.output = np.where(inputs > 0, inputs, self.alpha * inputs)
-
+        
+        return self.output
+    
     def backward(self, dvalues):
         self.dinputs = dvalues.copy()
         self.dinputs[self.inputs < 0] *= self.alpha
 
+class Batch_Norm:
+    def __init__ (self, epsilon = 1e-5, momentum = 0.9):
+        self.epsilon = epsilon
+        self.momentum = momentum
+        self.gamma = None
+        self.beta = None
+        self.running_mean = None
+        self.running_var = None
+    
+    def forward(self, inputs, training):
+        self.inputs = inputs
+        S = inputs.shape[0]
+        C = inputs.shape[-1]
+
+        if self.gamma is None: 
+            self.gamma = np.ones(C, dtype=np.float32)
+        if self.beta is None:
+            self.beta = np.zeros(C, dtype = np.float32)
+        if self.running_mean is None:
+            self.running_mean = np.zeros(C, dtype = np.float32)
+            self.running_var = np.ones(C, dtype = np.float32)
+        
+        if inputs.ndim == 4: #if cnn
+            axis = (0, 1, 2) 
+        else: #dense
+            axis = 0
+        
+        if training: 
+            self.batch_mean = np.mean(inputs, axis = axis, keepdims = True)
+            self.batch_var = np.var(inputs, axis = axis, keepdims = True)
+
+            self.normalized = (inputs - self.batch_mean) / np.sqrt(self.batch_var + self.epsilon)
+            self.output = self.gamma * self.normalized + self.beta
+
+            #now update the running statistics
+            self.running_mean = self.momentum * self.running_mean + (1 - self.momentum) * self.batch_mean
+            self.running_var = self.momentum * self.running_var + (1 - self.momentum) * self.batch_var
+        
+        else:
+            self.normalized = (inputs - self.running_mean) / np.sqrt(self.running_var + self.epsilon)
+            self.output = self.gamma * self.normalized + self.beta
+
+        return self.output 
+    
+    def backward(self, dvalues):
+        axes = (0, 1, 2) if dvalues.ndim == 4 else (0,)
+        N_total = np.prod([self.inputs.shape[ax] for ax in axes])
+
+        dhatx = dvalues * self.gamma # same shape as (N, H, W, C)
+
+        dvar = np.sum(dhatx * (self.inputs - self.batch_mean)
+                    * (-0.5)
+                    * np.power(self.batch_var + self.epsilon, -1.5),
+                    axis = axes,
+                    keepdims = True)
+
+        dmu = np.sum(dhatx * (-1.0 / np.sqrt(self.batch_var + self.epsilon)),
+                    axis = axes, keepdims = True) \
+                    + dvar * np.sum(-2.0 * (self.inputs - self.batch_mean),
+                    axis = axes, keepdims = True) / N_total
+
+        inv_sqrt = 1.0 / np.sqrt(self.batch_var + self.epsilon) #shape (1, 1, 1, C)
+        self.dinputs = (dhatx * inv_sqrt + dvar * 2.0 * (self.inputs - self.batch_mean) / N_total \
+                + dmu / N_total)
+        
+        
+        self.dgamma = np.sum(dvalues * self.normalized, axis=axes)
+        self.dbeta = np.sum(dvalues, axis=axes)
+
+        return self.dinputs 
+    
 class Flatten:
     def forward(self, inputs, training):
         # Save shape so we can restore it in backward pass
@@ -352,16 +436,21 @@ class Flatten:
         # Flatten all dimensions except batch size
         self.output = inputs.reshape(inputs.shape[0], -1)
 
+        return self.output
+    
     def backward(self, dvalues):
         # Reshape gradients back to input shape
         self.dinputs = dvalues.reshape(self.inputs_shape)
 
 class SoftMax:
+    
     def forward(self, inputs, training):
         self.exp_values = np.exp(inputs - np.max(inputs, axis=1, keepdims = True)) #e**(inputs - max(inputs by row))
         probabilities = self.exp_values / np.sum(self.exp_values, axis=1, keepdims = True) #e**k / sum(e**k) 
         self.output = probabilities
 
+        return self.output
+    
     def backward(self, dvalues):                #Doing this function is expensive. If we combine loss and softmax we can get a simpler function. 
         self.dinputs = np.empty_like(dvalues) 
 
@@ -376,7 +465,9 @@ class SoftMax:
             self.dinputs[index] = np.dot(jacobian, single_dvalues)     
 
     def predictions(self, outputs):
+
         return np.argmax(outputs, axis = 1) #return the max of the rows
+
 class Loss: 
 
     def remember_trainable_layers(self, trainable_layers):

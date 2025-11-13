@@ -138,6 +138,7 @@ class Conv_Layer:
             H_padded, W_padded, sH, sW,
             padded_dinputs.ravel()
         )
+
         #truncate our borders 
         if self.padding == "same":
             P = (fH - 1) // 2
@@ -413,6 +414,77 @@ class Leaky_ReLU:
         self.dinputs = dvalues.copy()
         self.dinputs[self.inputs < 0] *= self.alpha
 
+class Batch_Norm:
+    def __init__ (self, epsilon = 1e-5, momentum = 0.9):
+        self.epsilon = epsilon
+        self.momentum = momentum
+        self.gamma = None
+        self.beta = None
+        self.running_mean = None
+        self.running_var = None
+    
+    def forward(self, inputs, training):
+        self.inputs = inputs
+        S = inputs.shape[0]
+        C = inputs.shape[-1]
+
+        if self.gamma is None: 
+            self.gamma = cp.ones(C, dtype=cp.float32)
+        if self.beta is None:
+            self.beta = cp.zeros(C, dtype = cp.float32)
+        if self.running_mean is None:
+            self.running_mean = cp.zeros(C, dtype = cp.float32)
+            self.running_var = cp.ones(C, dtype = cp.float32)
+        
+        if inputs.ndim == 4: #if cnn
+            axis = (0, 1, 2) 
+        else: #dense
+            axis = 0
+        
+        if training: 
+            self.batch_mean = cp.mean(inputs, axis = axis, keepdims = True)
+            self.batch_var = cp.var(inputs, axis = axis, keepdims = True)
+
+            self.normalized = (inputs - self.batch_mean) / cp.sqrt(self.batch_var + self.epsilon)
+            self.output = self.gamma * self.normalized + self.beta
+
+            #now update the running statistics
+            self.running_mean = self.momentum * self.running_mean + (1 - self.momentum) * self.batch_mean
+            self.running_var = self.momentum * self.running_var + (1 - self.momentum) * self.batch_var
+        
+        else:
+            self.normalized = (inputs - self.running_mean) / cp.sqrt(self.running_var + self.epsilon)
+            self.output = self.gamma * self.normalized + self.beta
+
+        return self.output 
+    
+    def backward(self, dvalues):
+        axes = (0, 1, 2) if dvalues.ndim == 4 else (0,)
+        N_total = cp.prod([self.inputs.shape[ax] for ax in axes])
+
+        dhatx = dvalues * self.gamma # same shape as (N, H, W, C)
+
+        dvar = cp.sum(dhatx * (self.inputs - self.batch_mean)
+                    * (-0.5)
+                    * cp.power(self.batch_var + self.epsilon, -1.5),
+                    axis = axes,
+                    keepdims = True)
+
+        dmu = cp.sum(dhatx * (-1.0 / cp.sqrt(self.batch_var + self.epsilon)),
+                    axis = axes, keepdims = True) \
+                    + dvar * cp.sum(-2.0 * (self.inputs - self.batch_mean),
+                    axis = axes, keepdims = True) / N_total
+
+        inv_sqrt = 1.0 / cp.sqrt(self.batch_var + self.epsilon) #shape (1, 1, 1, C)
+        self.dinputs = (dhatx * inv_sqrt + dvar * 2.0 * (self.inputs - self.batch_mean) / N_total \
+                + dmu / N_total)
+        
+        
+        self.dgamma = cp.sum(dvalues * self.normalized, axis=axes)
+        self.dbeta = cp.sum(dvalues, axis=axes)
+
+        return self.dinputs 
+    
 class Flatten:
     def forward(self, inputs, training):
         # Save shape so we can restore it in backward pass
@@ -421,6 +493,7 @@ class Flatten:
         self.output = inputs.reshape(inputs.shape[0], -1)
 
         return self.output
+    
     def backward(self, dvalues):
         # Reshape gradients back to input shape
         self.dinputs = dvalues.reshape(self.inputs_shape)
