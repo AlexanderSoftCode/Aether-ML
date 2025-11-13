@@ -1,33 +1,65 @@
 import cupy as cp 
 from cupy.lib.stride_tricks import as_strided
 
+scatter_contributions_kernel = cp.ElementwiseKernel(
+    in_params='''
+        float32 contribution, 
+        int32 S, int32 H_out, int32 W_out,
+        int32 fH, int32 fW, int32 C_in,
+        int32 H_padded, int32 W_padded,
+        int32 sH, int32 sW
+    ''',
+    out_params='raw float32 padded_dinputs',
+    operation=r'''
+        // i is the linear index into contributions array
+        // Decode: (s, h_out, w_out, fh, fw, c_in)
+        int c_in = i % C_in;
+        int fw = (i / C_in) % fW;
+        int fh = (i / (C_in * fW)) % fH;
+        int w_out = (i / (C_in * fW * fH)) % W_out;
+        int h_out = (i / (C_in * fW * fH * W_out)) % H_out;
+        int s = i / (C_in * fW * fH * W_out * H_out);
+        
+        // Calculate target position in padded_dinputs
+        int h_target = h_out * sH + fh;
+        int w_target = w_out * sW + fw;
+        
+        // Calculate linear index in padded_dinputs
+        int target_idx = ((s * H_padded + h_target) * W_padded + w_target) * C_in + c_in;
+        
+        // Atomic add to handle overlaps
+        // 'contribution' (singular) is the current element value
+        atomicAdd(&padded_dinputs[target_idx], contribution);
+    ''',
+    name='scatter_contributions'
+)
+
 class Conv_Layer:
     def __init__(self, input_shape, num_filters = 1, filter_size = (3, 3), strides = (1, 1), padding = "same"):
 
-        #input_shape has form (height, width, channels) 
-        #where batch size would be accounted for in the forward and backwards passes
-        self.input_shape = input_shape 
+        #input_shape has form (batch_size, height, width, channels)
+        self.input_shape = input_shape
         self.num_filters = num_filters
         self.filter_size = filter_size
         self.strides = strides
         self.padding = padding 
-        self.biases = cp.zeros(self.num_filters) 
+        self.biases = cp.zeros(self.num_filters, dtype = cp.float32) * 0.01
 
         #We'll handle two scenarios, the first, where we pass in a (n, n, 1) or grayscale image, and a second
         #where we'll handle a (n, n, 3) or RGB image. 
         input_depth = input_shape[-1]
         n = self.filter_size[0] * self.filter_size[1] * input_depth
-        std = cp.sqrt(2.0 / n)
+        std = cp.sqrt(cp.float32(2.0 / n))
         
         #We can now do He initaliztion, we'll sample values from a standard distribution N (0, 1) and multiply it by our
         #std value to get N(0, std) 
 
-        self.filter_weights = cp.random.randn(
+        self.filter_weights = (cp.random.randn(
             filter_size[0],         #height
             filter_size[1],         #width
             input_depth,            #depth 
             num_filters             #number of filters
-        )* std
+        ).astype(cp.float32)* std)
 
     def forward(self, inputs, training):
         #Extract Input dimensions
@@ -54,10 +86,10 @@ class Conv_Layer:
         padded_inputs = cp.pad(array = inputs, 
                             pad_width = ((0, 0), (P, P), (P, P), (0, 0)),
                             mode = 'constant',
-                            constant_values = 0)
+                            constant_values = 0).astype(cp.float32, copy = False)
 
         #Create an output tensor of size (batch_size, H_out, W_out, C_out)
-        self.output = cp.zeros((S, H_out, W_out, self.num_filters))
+        self.output = cp.zeros((S, H_out, W_out, self.num_filters), dtype = cp.float32)
 
         #create our sliding window
         self.patches = as_strided(
@@ -79,14 +111,16 @@ class Conv_Layer:
 
         self.inputs = inputs
         self.padded_inputs = padded_inputs
-        return self.output.copy()
+        return self.output
         #save the output tensor using self. for backpropogation
 
     def backward(self, dvalues):
+
         #extract dvalues dimensions
         S, H_out, W_out, C_out = dvalues.shape
         fH, fW, C_in, C_out = self.filter_weights.shape
         sH, sW = self.strides
+        H_padded, W_padded = self.padded_inputs.shape[1:3]
 
         #dbiases has shape c_out as we intend to add dvalues to each filter. 
         self.dbiases = cp.sum(dvalues, axis = (0 , 1, 2)) 
@@ -97,31 +131,61 @@ class Conv_Layer:
 
         contributions = cp.einsum("shwd, xycd -> shwxyc", dvalues, self.filter_weights)
 
-        #We'll use our window feature to add whatever contributions we had, 
-        #By using writeable, we'll be able to add stuff. 
-        dinput_patches = as_strided(
-            padded_dinputs,
-            shape = (S, H_out, W_out, fH, fW, C_in),
-            strides = (
-            padded_dinputs.strides[0],       # step between samples
-                padded_dinputs.strides[1] * sH,  # step down a row
-                padded_dinputs.strides[2] * sW,  # step across a column
-                padded_dinputs.strides[1],       # move down 1 row inside patch
-                padded_dinputs.strides[2],       # move right 1 col inside patch
-                padded_dinputs.strides[3],       # step across channels
-            ),
-            writeable=True
+        contributions = contributions.astype(cp.float32)
+        scatter_contributions_kernel(
+            contributions.ravel(),
+            S, H_out, W_out, fH, fW, C_in,
+            H_padded, W_padded, sH, sW,
+            padded_dinputs.ravel()
         )
-
-        dinput_patches += contributions 
-
         #truncate our borders 
         if self.padding == "same":
             P = (fH - 1) // 2
             self.dinputs = padded_dinputs[:, P:-P, P:-P, :] 
         else:
-            self.dinputs = padded_dinputs[:, :, :, :] 
+            self.dinputs = padded_dinputs 
         return self.dinputs
+
+scatter_avg_pooling_kernel = cp.ElementwiseKernel(
+    in_params='''
+        float32 dval,
+        int32 S, int32 H_out, int32 W_out, int32 C,
+        int32 H_in, int32 W_in,
+        int32 fH, int32 fW,
+        int32 sH, int32 sW
+    ''',
+    out_params='raw float32 dinputs',
+    operation=r'''
+        // i is the linear index into dvalues
+        // Decode: (s, h_out, w_out, c)
+        int c = i % C;
+        int w_out = (i / C) % W_out;
+        int h_out = (i / (C * W_out)) % H_out;
+        int s = i / (C * W_out * H_out);
+        
+        // Gradient to distribute to each position in the pool
+        float grad_per_position = dval / (fH * fW);
+        
+        // Calculate starting position in input
+        int h_start = h_out * sH;
+        int w_start = w_out * sW;
+        
+        // Distribute gradient to all positions in this pool window
+        for (int fh = 0; fh < fH; fh++) {
+            for (int fw = 0; fw < fW; fw++) {
+                int h_in = h_start + fh;
+                int w_in = w_start + fw;
+                
+                // Calculate linear index in dinputs
+                int target_idx = ((s * H_in + h_in) * W_in + w_in) * C + c;
+                
+                // Atomic add to handle overlapping windows
+                atomicAdd(&dinputs[target_idx], grad_per_position);
+            }
+        }
+    ''',
+    name='scatter_avg_pooling'
+)
 
 class Pooling: 
     def __init__(self, filter_size = (2, 2), strides = (2, 2),
@@ -133,6 +197,7 @@ class Pooling:
 
     def forward(self, inputs, training):
         #Inputs should be of shape (S, H_in, W_in, C = D_in) 
+        inputs = inputs.astype(cp.float32, copy = False)
         if inputs.ndim != 4:
             raise ValueError(f"Expected a 4D tensor, got {inputs.ndim} instead.")
         S, H_in, W_in, C = inputs.shape
@@ -141,8 +206,8 @@ class Pooling:
 
         padding = self.padding
         if padding == "valid":
-            H_out = cp.floor((H_in - fH) / sH) + 1
-            W_out = cp.floor((W_in - fW) / sW) + 1
+            H_out = int(cp.floor((H_in - fH) / sH + 1).item())
+            W_out = int(cp.floor((W_in - fW) / sW + 1).item())
         
         elif padding == "same":
             pad_h = max((H_out - 1) * sH + fH - H_in, 0)
@@ -195,9 +260,11 @@ class Pooling:
 
     def backward(self, dvalues):
         
+        dvalues = dvalues.astype(cp.float32, copy = False)
         #We want the same shape as self.inputs, we'll populate the tensor with zeros at first then unpool later.
-        self.dinputs = cp.zeros_like(self.inputs)
+        self.dinputs = cp.zeros_like(self.inputs, dtype=cp.float32)
         S, H_out, W_out, C = dvalues.shape
+        H_in, W_in = self.inputs.shape[1:3]
         fH, fW = self.filter_size
         sH, sW = self.strides
         
@@ -219,22 +286,15 @@ class Pooling:
             cp.add.at(self.dinputs, (s_idx, input_h, input_w, c_idx), dvalues)
         
         elif self.pooling_type == "average":
-            patches = as_strided(
-            self.dinputs,
-            shape = (S, H_out, W_out, fH, fW, C), 
-            strides = (
-                self.dinputs.strides[0],      #step between samples
-                self.dinputs.strides[1] * sH, #step between rows
-                self.dinputs.strides[2] * sW, #step between columns
-                self.dinputs.strides[1],      #Move down 1 row inside patch
-                self.dinputs.strides[2],      #move right 1col inside patch
-                self.dinputs.strides[3],      #step between each channel
-            ),
-            writeable = True
-            )
             
-            add_vals = dvalues[:, :, :, None, None, :] / (fH * fW)
-            cp.add(patches, add_vals, out = patches) 
+            scatter_avg_pooling_kernel(
+                dvalues.ravel(),
+                S, H_out, W_out, C,
+                H_in, W_in, 
+                fH, fW,
+                sH, sW,
+                self.dinputs.ravel()
+            )
         return self.dinputs
 
 
@@ -254,6 +314,7 @@ class Layer_Dense:
     def forward(self, inputs, training):
         self.inputs = inputs 
         self.output = cp.dot(inputs, self.weights) + self.biases
+        return self.output
 
     def backward(self, dvalues):
         self.dweights = cp.dot(self.inputs.T, dvalues)
@@ -301,6 +362,8 @@ class Layer_Dropout:
                         / self.rate
         self.output = self.binary_mask * self.inputs
 
+        return self.output
+    
     def backward(self, dvalues):
         self.dinputs = dvalues * self.binary_mask 
 
@@ -309,17 +372,20 @@ class Layer_Dropout_Spatial:
         
         self.rate = rate
         self.keep_prob = 1 - rate
+
     def forward(self, inputs, training):
         self.inputs = inputs
 
         if not training:
             self.output = inputs.copy()
-            return
+            return self.output
         C = self.inputs.shape[-1]
         self.channel_mask = cp.random.binomial(1, self.keep_prob, size = (1, 1, 1, C)) \
                             / self.keep_prob
         self.output = inputs * self.channel_mask
 
+        return self.output
+    
     def backward(self, dvalues): 
         self.dinputs = dvalues * self.channel_mask
 
@@ -328,6 +394,7 @@ class ReLU:
     def forward(self, inputs, training):
         self.inputs = inputs
         self.output = cp.maximum(0, inputs)
+        return self.output
 
     def backward(self, dvalues):
         self.dinputs = dvalues.copy()
@@ -340,6 +407,7 @@ class Leaky_ReLU:
     def forward(self, inputs, training):
         self.inputs = inputs
         self.output = cp.where(inputs > 0, inputs, self.alpha * inputs)
+        return self.output
 
     def backward(self, dvalues):
         self.dinputs = dvalues.copy()
@@ -352,6 +420,7 @@ class Flatten:
         # Flatten all dimensions except batch size
         self.output = inputs.reshape(inputs.shape[0], -1)
 
+        return self.output
     def backward(self, dvalues):
         # Reshape gradients back to input shape
         self.dinputs = dvalues.reshape(self.inputs_shape)
@@ -361,6 +430,8 @@ class SoftMax:
         self.exp_values = cp.exp(inputs - cp.max(inputs, axis=1, keepdims = True)) #e**(inputs - max(inputs by row))
         probabilities = self.exp_values / cp.sum(self.exp_values, axis=1, keepdims = True) #e**k / sum(e**k) 
         self.output = probabilities
+
+        return self.output
 
     def backward(self, dvalues):                #Doing this function is expensive. If we combine loss and softmax we can get a simpler function. 
         self.dinputs = cp.empty_like(dvalues) 
