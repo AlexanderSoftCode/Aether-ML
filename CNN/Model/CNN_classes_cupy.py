@@ -358,7 +358,7 @@ class Layer_Dropout:
         self.inputs = inputs
         if not training:
             self.output = inputs.copy()
-            return
+            return self.output
         self.binary_mask = cp.random.binomial(1, self.rate, size = inputs.shape) \
                         / self.rate
         self.output = self.binary_mask * self.inputs
@@ -415,26 +415,27 @@ class Leaky_ReLU:
         self.dinputs[self.inputs < 0] *= self.alpha
 
 class Batch_Norm:
-    def __init__ (self, epsilon = 1e-5, momentum = 0.9):
+    def __init__ (self, epsilon = 1e-5, momentum = 0.9, n_features = None):
         self.epsilon = epsilon
         self.momentum = momentum
-        self.gamma = None
-        self.beta = None
+        if n_features is not None:
+            self.gamma = cp.ones(n_features, dtype=cp.float32)
+            self.beta = cp.zeros(n_features, dtype=cp.float32)
+        else:
+            self.gamma = None
+            self.beta = None
         self.running_mean = None
         self.running_var = None
-    
+        
     def forward(self, inputs, training):
-        self.inputs = inputs
-        S = inputs.shape[0]
-        C = inputs.shape[-1]
+        self.inputs = inputs        
 
         if self.gamma is None: 
+            C = inputs.shape[-1]
             self.gamma = cp.ones(C, dtype=cp.float32)
-        if self.beta is None:
-            self.beta = cp.zeros(C, dtype = cp.float32)
-        if self.running_mean is None:
-            self.running_mean = cp.zeros(C, dtype = cp.float32)
-            self.running_var = cp.ones(C, dtype = cp.float32)
+            self.beta = cp.zeros(C, dtype=cp.float32)
+            self.running_mean = cp.zeros(C, dtype=cp.float32)
+            self.running_var = cp.ones(C, dtype=cp.float32)
         
         if inputs.ndim == 4: #if cnn
             axis = (0, 1, 2) 
@@ -460,7 +461,7 @@ class Batch_Norm:
     
     def backward(self, dvalues):
         axes = (0, 1, 2) if dvalues.ndim == 4 else (0,)
-        N_total = cp.prod([self.inputs.shape[ax] for ax in axes])
+        N_total = cp.prod(cp.array([self.inputs.shape[ax] for ax in axes]))
 
         dhatx = dvalues * self.gamma # same shape as (N, H, W, C)
 
@@ -484,7 +485,13 @@ class Batch_Norm:
         self.dbeta = cp.sum(dvalues, axis=axes)
 
         return self.dinputs 
-    
+    def get_parameters(self):
+        return self.gamma, self.beta
+
+    def set_parameters(self, gamma, beta):
+        self.gamma = gamma
+        self.beta = beta
+
 class Flatten:
     def forward(self, inputs, training):
         # Save shape so we can restore it in backward pass
