@@ -44,6 +44,10 @@ class Conv_Layer:
         self.strides = strides
         self.padding = padding 
         self.biases = cp.zeros(self.num_filters, dtype = cp.float32) * 0.01
+        self.weight_regularizer_l1 = 0
+        self.weight_regularizer_l2 = 0
+        self.bias_regularizer_l1 = 0
+        self.bias_regularizer_l2 = 0
 
         #We'll handle two scenarios, the first, where we pass in a (n, n, 1) or grayscale image, and a second
         #where we'll handle a (n, n, 3) or RGB image. 
@@ -60,6 +64,8 @@ class Conv_Layer:
             input_depth,            #depth 
             num_filters             #number of filters
         ).astype(cp.float32)* std)
+
+        self.weights = self.filter_weights
 
     def forward(self, inputs, training):
         #Extract Input dimensions
@@ -146,6 +152,13 @@ class Conv_Layer:
         else:
             self.dinputs = padded_dinputs 
         return self.dinputs
+    
+    def get_parameters(self):
+        return self.filter_weights, self.biases
+
+    def set_parameters(self, weights, biases):
+        self.filter_weights = weights
+        self.biases = biases
 
 scatter_avg_pooling_kernel = cp.ElementwiseKernel(
     in_params='''
@@ -421,12 +434,21 @@ class Batch_Norm:
         if n_features is not None:
             self.gamma = cp.ones(n_features, dtype=cp.float32)
             self.beta = cp.zeros(n_features, dtype=cp.float32)
+            self.weights = self.gamma
+            self.biases = self.beta
         else:
             self.gamma = None
             self.beta = None
+            self.weights = self.gamma
+            self.biases = self.beta
+            
         self.running_mean = None
         self.running_var = None
-        
+        self.weight_regularizer_l1 = 0
+        self.weight_regularizer_l2 = 0
+        self.bias_regularizer_l1 = 0
+        self.bias_regularizer_l2 = 0
+
     def forward(self, inputs, training):
         self.inputs = inputs        
 
@@ -436,7 +458,9 @@ class Batch_Norm:
             self.beta = cp.zeros(C, dtype=cp.float32)
             self.running_mean = cp.zeros(C, dtype=cp.float32)
             self.running_var = cp.ones(C, dtype=cp.float32)
-        
+            self.weights = self.gamma
+            self.biases = self.beta
+
         if inputs.ndim == 4: #if cnn
             axis = (0, 1, 2) 
         else: #dense
@@ -480,17 +504,28 @@ class Batch_Norm:
         self.dinputs = (dhatx * inv_sqrt + dvar * 2.0 * (self.inputs - self.batch_mean) / N_total \
                 + dmu / N_total)
         
-        
-        self.dgamma = cp.sum(dvalues * self.normalized, axis=axes)
-        self.dbeta = cp.sum(dvalues, axis=axes)
+        self.dweights = cp.sum(dvalues * self.normalized, axis=axes)
+        self.dbiases = cp.sum(dvalues, axis=axes)
 
         return self.dinputs 
+    
     def get_parameters(self):
-        return self.gamma, self.beta
+        return (
+            self.gamma,
+            self.beta,
+            self.running_mean,
+            self.running_var
+        )
 
-    def set_parameters(self, gamma, beta):
+    def set_parameters(self, gamma, beta, running_mean, running_var):
         self.gamma = gamma
         self.beta = beta
+        self.running_mean = running_mean
+        self.running_var = running_var
+
+        # keep internal references consistent
+        self.weights = self.gamma
+        self.biases  = self.beta
 
 class Flatten:
     def forward(self, inputs, training):

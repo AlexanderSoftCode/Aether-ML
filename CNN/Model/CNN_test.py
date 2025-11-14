@@ -2,6 +2,7 @@ import numpy as np
 import time 
 
 from CNN.Model.CNN_model import *
+
 print("Numpy version")
 #X, y, X_test, y_test = create_data_mnist('fashion_mnist_images')
 data = np.load("CodeTest/fashion_mnist_train.npz")
@@ -63,6 +64,6 @@ model.train(X, y, validation_data = (X_test, y_test),
             epochs = 10, batch_size = 128, print_every = 100)
 end = time.time()
 
-model.save(path = "CNN/model1")
+model.save(path = "CNN/model3")
 
 print("training time, ", end - start)
