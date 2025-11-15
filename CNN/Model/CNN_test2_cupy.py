@@ -59,7 +59,7 @@ model.add(Layer_Dense(256, 10))
 model.add(SoftMax())
 
 model.set(
-    loss = Loss_CategoricalCrossEntropy(),
+    loss = Loss_CategoricalCrossEntropy(label_smoothing= 0.05),
     optimizer = Optimizer_Adam(learning_rate = 0.001, decay = 5e-5),
     accuracy = Accuracy_Categorical()
 )
@@ -83,3 +83,4 @@ print("training time, ", end - start)
 #where validation was at .916 training accuracy and .247 loss. only change was .05 dropout on last layer
 
 #model 2 record is .946 accuracy, 1.53 loss, with validation acc .919 loss .239 
+#model 4 will hold the same settings as model 2 except include label_smoothing = 0.05

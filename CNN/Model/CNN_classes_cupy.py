@@ -563,6 +563,7 @@ class SoftMax:
 
     def predictions(self, outputs):
         return cp.argmax(outputs, axis = 1) #return the max of the rows
+    
 class Loss: 
 
     def remember_trainable_layers(self, trainable_layers):
@@ -611,19 +612,40 @@ class Loss:
         return regularization_loss
 
 class Loss_CategoricalCrossEntropy(Loss): 
+    def __init__(self, label_smoothing = 0.0):
+        self.label_smoothing = label_smoothing 
+
     def forward(self, y_pred, y_true):
         #num samples in batch
         samples = len(y_pred)
-
+        n_classes = y_pred.shape[1]
         #next lets clip before continuing
         y_pred_clip = cp.clip(y_pred, 1e-7, 1 - 1e-7) #.000001 -> .999999
 
         if len(y_true.shape) == 1:                                      #scale vector [0, 1, 2]
             correct_confidences = y_pred_clip[range(samples), y_true]
+            
+            if self.label_smoothing > 0:
+                #smooth labels
+                smooth_positives = 1.0 - self.label_smoothing
+                smooth_negatives = self.label_smoothing / n_classes
+
+                negative_log_likelihood = -cp.log(correct_confidences)
+                loss = smooth_positives * negative_log_likelihood
+                loss -= smooth_negatives * cp.sum(cp.log(y_pred_clip), axis =1)
+            else:
+                loss = -cp.log(correct_confidences)
+
         elif len(y_true.shape) == 2:                                    #one hot encoding [0, 1, 0] [1, 0, 0]...
-            correct_confidences = cp.sum(y_pred_clip * y_true, axis=1)             #axis1 = sum rows, 
-        neg_log_likelihoods = -cp.log(correct_confidences)              #-log(0,0,0,.59,0,0,0)
-        return neg_log_likelihoods
+            if self.label_smoothing > 0:
+                # Apply smoothing to one-hot labels
+                y_true_smooth = y_true * (1 - self.label_smoothing) + self.label_smoothing / n_classes
+                loss = -cp.sum(y_true_smooth * cp.log(y_pred_clip), axis=1)
+        else:
+            correct_confidences = cp.sum(y_pred_clip * y_true, axis=1)
+            loss = -cp.log(correct_confidences)
+                
+        return loss
     
     def backward(self, dvalues, y_true):
         samples = len(dvalues)
@@ -639,9 +661,10 @@ class Loss_CategoricalCrossEntropy(Loss):
         self.dinputs = self.dinputs / samples
 
 class Activation_Softmax_Loss_CategoricalCrossEntropy():
-    def __init__(self):
+    def __init__(self, label_smoothing = 0.0):
         self.activation = SoftMax()
         self.loss = Loss_CategoricalCrossEntropy()
+        self.label_smoothing = label_smoothing
 
     #y_true is the vector of correct class indices, one per sample.
     #dvalues is output of softmax layer shape(n_samples, n_classes)
@@ -652,16 +675,28 @@ class Activation_Softmax_Loss_CategoricalCrossEntropy():
     
     def backward(self, dvalues, y_true):
         samples = len(dvalues)                          #For the backward note the samples
+        n_classes = dvalues.shape[1]
         #If labels are one-hot encoded, 
         #turn them into discrete values
         if len(y_true.shape) == 2:                      #if dataset answers return one hot
             y_true = cp.argmax(y_true, axis = 1)        #take the max of the rows
 
-        self.dinputs = dvalues.copy() #copy 
+        self.dinputs = dvalues.copy()  
+
+        if self.label_smoothing > 0:
+            #subtract smoothed one-hot vector
+            self.dinputs[range(samples), y_true] -= (1.0 - self.label_smoothing)
+            
+            #add uniform distribution across all classes
+            self.dinputs += self.label_smoothing / n_classes
+        
         #subtracts 1 from the predicted probability of the correct class for each sample.
         #This turns the softmax outputs into the correct gradient expression
         # (softmax - one_hot) for backpropagation.
-        self.dinputs[range(samples), y_true] -= 1
+        
+        else:
+            self.dinputs[range(samples), y_true] -= 1
+
         #normalize
         self.dinputs = self.dinputs / samples 
 

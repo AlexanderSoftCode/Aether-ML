@@ -1,11 +1,11 @@
 import numpy as np
-from Model.modelfinal import *
+from CodeTest.Model.modelfinal import *
 #Load dataset
 
-data = np.load("fashion_mnist_train.npz")
+data = np.load("CodeTest/fashion_mnist_train.npz")
 X, y = data["X"], data["y"]
 
-data = np.load("fashion_mnist_test.npz")
+data = np.load("CodeTest/fashion_mnist_test.npz")
 X_test, y_test = data["X"], data["y"]
 
 keys = np.array(range(X.shape[0]))
@@ -19,11 +19,11 @@ X_test = (X_test.reshape(X_test.shape[0], -1).astype(np.float32) - 127.5) / 127.
 
 model = Model()
 
-model.add(Layer_Dense(X.shape[1], 128))
+model.add(Layer_Dense(X.shape[1], 256))
 model.add(ReLU())
-model.add(Layer_Dense(128, 128))
+model.add(Layer_Dense(256, 256))
 model.add(ReLU())
-model.add(Layer_Dense(128, 10))
+model.add(Layer_Dense(256, 10))
 model.add(SoftMax())
 
 model.set(

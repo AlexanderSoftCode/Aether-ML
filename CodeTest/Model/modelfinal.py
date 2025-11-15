@@ -1,7 +1,7 @@
 #classes
 import copy
 import pickle
-from Model.classesfinal import * 
+from CodeTest.Model.classesfinal import * 
 
 class Model:
 
