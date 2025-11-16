@@ -569,8 +569,8 @@ class Loss:
     def remember_trainable_layers(self, trainable_layers):
         self.trainable_layers = trainable_layers
 
-    def calculate(self, output, y, *, include_regularization= False):
-        sample_losses = self.forward(output, y) #calc sample losses
+    def calculate(self, output, y, *, include_regularization= False, training = True):
+        sample_losses = self.forward(output, y, training) #calc sample losses
         data_loss = cp.mean(sample_losses)      #calc mean/average losses
 
         self.accumulated_sum += cp.sum(sample_losses)
@@ -615,90 +615,72 @@ class Loss_CategoricalCrossEntropy(Loss):
     def __init__(self, label_smoothing = 0.0):
         self.label_smoothing = label_smoothing 
 
-    def forward(self, y_pred, y_true):
+    def forward(self, y_pred, y_true, training = True):
         #num samples in batch
-        samples = len(y_pred)
         n_classes = y_pred.shape[1]
         #next lets clip before continuing
         y_pred_clip = cp.clip(y_pred, 1e-7, 1 - 1e-7) #.000001 -> .999999
 
-        if len(y_true.shape) == 1:                                      #scale vector [0, 1, 2]
-            correct_confidences = y_pred_clip[range(samples), y_true]
+        if len(y_true.shape) == 1:                    #scale vector [0, 1, 2]
+            y_true = cp.eye(n_classes)[y_true]
             
-            if self.label_smoothing > 0:
-                #smooth labels
-                smooth_positives = 1.0 - self.label_smoothing
-                smooth_negatives = self.label_smoothing / n_classes
-
-                negative_log_likelihood = -cp.log(correct_confidences)
-                loss = smooth_positives * negative_log_likelihood
-                loss -= smooth_negatives * cp.sum(cp.log(y_pred_clip), axis =1)
-            else:
-                loss = -cp.log(correct_confidences)
-
-        elif len(y_true.shape) == 2:                                    #one hot encoding [0, 1, 0] [1, 0, 0]...
-            if self.label_smoothing > 0:
-                # Apply smoothing to one-hot labels
-                y_true_smooth = y_true * (1 - self.label_smoothing) + self.label_smoothing / n_classes
-                loss = -cp.sum(y_true_smooth * cp.log(y_pred_clip), axis=1)
-        else:
-            correct_confidences = cp.sum(y_pred_clip * y_true, axis=1)
-            loss = -cp.log(correct_confidences)
-                
+        #apply label smoothing if used
+        if self.label_smoothing > 0 and training:
+            y_true = y_true * (1.0 - self.label_smoothing) + \
+                    self.label_smoothing / n_classes
+        
+        #standard CE loss
+        loss = -cp.sum(y_true * cp.log(y_pred_clip), axis = 1)
+        
         return loss
     
     def backward(self, dvalues, y_true):
         samples = len(dvalues)
+        n_classes = dvalues.shape[1]
+
         #number of labels per sample
-        labels = len(dvalues[0]) 
         #if the labels are sparse turn them into one hot vector
         if len(y_true.shape) == 1:
-            y_true = cp.eye(labels)[y_true] #create a lookup table of labelsxlabels with indexes y_true where y_true = 1xn 
 
-        #calculate gradient 
-        self.dinputs = -y_true / dvalues #we are dividng our true by softmax outputs. Then we get inputs. 
-        #Normalize gradient with num samples
-        self.dinputs = self.dinputs / samples
+            #create a lookup table of n_classesxnclasses
+            # with indexes y_true where y_true = 1xn 
+            y_true = cp.eye(n_classes)[y_true]
+
+        #apply label smoothing again to match foward pass
+        if self.label_smoothing > 0:
+            y_true = y_true * (1.0 - self.label_smoothing) + \
+                    self.label_smoothing / n_classes
+            
+        #calculate CE gradient
+        self.dinputs = (dvalues - y_true) / samples 
 
 class Activation_Softmax_Loss_CategoricalCrossEntropy():
     def __init__(self, label_smoothing = 0.0):
         self.activation = SoftMax()
-        self.loss = Loss_CategoricalCrossEntropy()
+        self.loss = Loss_CategoricalCrossEntropy(label_smoothing)
         self.label_smoothing = label_smoothing
-
     #y_true is the vector of correct class indices, one per sample.
     #dvalues is output of softmax layer shape(n_samples, n_classes)
-    def forward(self, inputs, y_true):
+    def forward(self, inputs, y_true, training = True):
         self.activation.forward(inputs)                 #call forward function of softmax
         self.output = self.activation.output            #take the output as output of forward
-        return self.loss.calculate(self.output, y_true) #take the loss via the ouput of softmax versus true
+        return self.loss.calculate(self.output, y_true, training = training) #take the loss via the ouput of softmax versus true
     
-    def backward(self, dvalues, y_true):
+    def backward(self, dvalues, y_true, training = True):
         samples = len(dvalues)                          #For the backward note the samples
         n_classes = dvalues.shape[1]
-        #If labels are one-hot encoded, 
-        #turn them into discrete values
-        if len(y_true.shape) == 2:                      #if dataset answers return one hot
-            y_true = cp.argmax(y_true, axis = 1)        #take the max of the rows
-
-        self.dinputs = dvalues.copy()  
-
-        if self.label_smoothing > 0:
-            #subtract smoothed one-hot vector
-            self.dinputs[range(samples), y_true] -= (1.0 - self.label_smoothing)
-            
-            #add uniform distribution across all classes
-            self.dinputs += self.label_smoothing / n_classes
         
-        #subtracts 1 from the predicted probability of the correct class for each sample.
-        #This turns the softmax outputs into the correct gradient expression
-        # (softmax - one_hot) for backpropagation.
+        #if dataset is sparse, create one hot, 
+        #else if one hot already then don't convert
+        if len(y_true.shape) == 1:                      
+            y_true = cp.eye(n_classes, dtype = cp.float32)[y_true]
         
-        else:
-            self.dinputs[range(samples), y_true] -= 1
+        if self.label_smoothing > 0 and training:
+            y_true = y_true * (1.0 - self.label_smoothing) \
+                            + (self.label_smoothing / n_classes)
 
-        #normalize
-        self.dinputs = self.dinputs / samples 
+        #gradient = (p - y_smooth) where we normalize after 
+        self.dinputs = (dvalues - y_true) / samples
 
 #general starting learning rate for SGD is 1.0, with a decay down to 0.1. For Adam, a good starting 
 #LR is 0.001 (1e-3), decaying down to 0.0001 (1e-4). Different problems may require different 

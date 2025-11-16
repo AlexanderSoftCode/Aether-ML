@@ -61,7 +61,7 @@ class Model:
             isinstance(self.loss, Loss_CategoricalCrossEntropy):
             #create an object of combined activation and loss functions
             self.softmax_classifier_output = \
-            Activation_Softmax_Loss_CategoricalCrossEntropy()
+            Activation_Softmax_Loss_CategoricalCrossEntropy(self.loss.label_smoothing)
 
     def train(self, X, y, *, epochs = 1, batch_size = None, print_every = 1, validation_data = None):
 
@@ -108,7 +108,8 @@ class Model:
                 #Loss
                 data_loss, regularization_loss = \
                     self.loss.calculate(output, batch_y,
-                                        include_regularization = True)
+                                        include_regularization = True,
+                                        training = True)
                 
                 loss = data_loss + regularization_loss
                 
@@ -167,7 +168,7 @@ class Model:
             #First call backward method on the
             #combined activation/loss this will set 
             #dinputs properly
-            self.softmax_classifier_output.backward(output, y)
+            self.softmax_classifier_output.backward(output, y, training = True)
 
             #since we'll not call backward method of the last layer
             #aka softmax since we're using combined activation/loss
@@ -185,19 +186,12 @@ class Model:
         #First call the backwards method on loss
         #This will set dinputs property that the last layer
         #will access
-        self.loss.backward(output, y)
+        self.loss.backward(output, y, training = True )
 
         #Class backward method going through all the objects in reverse order
         for layer in reversed(self.layers):
             layer.backward(layer.next.dinputs)
    
-    def forward_debug(self, X):
-        print("Input:", X.shape)
-        for i, layer in enumerate(self.layers):
-            X = layer.forward(X, training=False)
-            print(f"After layer {i} ({layer.__class__.__name__}): {X.shape}")
-        return X
-
     def backward_debug(self, X, y):
         # Forward pass to set outputs
         out = X
@@ -254,7 +248,7 @@ class Model:
                 batch_y = y_val[step * batch_size:(step+1)*batch_size]
             
             output = self.forward(batch_X, training = False)
-            self.loss.calculate(output, batch_y)
+            self.loss.calculate(output, batch_y, training = False)
             predictions = self.output_layer_activation.predictions(output)
             self.accuracy.calculate(predictions, batch_y)
 

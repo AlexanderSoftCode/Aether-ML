@@ -59,7 +59,7 @@ model.add(Layer_Dense(256, 10))
 model.add(SoftMax())
 
 model.set(
-    loss = Loss_CategoricalCrossEntropy(label_smoothing= 0.05),
+    loss = Loss_CategoricalCrossEntropy(label_smoothing= 0.02),
     optimizer = Optimizer_Adam(learning_rate = 0.001, decay = 5e-5),
     accuracy = Accuracy_Categorical()
 )
@@ -68,14 +68,13 @@ model.finalize()
 
 
 start = time.time() 
+#model.backward_debug(X[:1], y[:1])
 model.train(X, y, validation_data = (X_test, y_test),
             epochs = 8, batch_size = 128, print_every = 100)
 end = time.time()
 
-#model.forward_debug(X[:1])  # single image
-#model.backward_debug(X[:1], y[:1])
 
-model.save_parameters(path = "CNN/Model/model4")
+model.save_parameters(path = "CNN/Model/model5")
 
 print("training time, ", end - start)
 
@@ -83,4 +82,6 @@ print("training time, ", end - start)
 #where validation was at .916 training accuracy and .247 loss. only change was .05 dropout on last layer
 
 #model 2 record is .946 accuracy, 1.53 loss, with validation acc .919 loss .239 
-#model 4 will hold the same settings as model 2 except include label_smoothing = 0.05
+#model 4 will hold the same settings as model 2 except
+#include new loss calculation as well as label smoothing = 0.01
+#model 4 had .951 training accuracy .221 loss with validation acc .919 loss .305
