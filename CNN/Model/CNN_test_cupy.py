@@ -17,6 +17,7 @@ y_test = y_test.astype(cp.int32)
 #X = X[..., cp.newaxis]
 #X_test = X_test[..., cp.newaxis]
 #Now we need to shuffle the batches
+start = time.time() 
 
 keys = cp.array(range(X.shape[0]))
 cp.random.shuffle(keys)
@@ -44,17 +45,16 @@ model.set(
 
 model.finalize()
 
-#_ = model.forward_debug(X[:1])  # single image
-
-start = time.time() 
 model.train(X, y, validation_data = (X_test, y_test),
             epochs = 10, batch_size = 128, print_every = 100)
-end = time.time()
+
+model.save(path = "CNN/Model/model1")
+
 
 #_ = model.forward_debug(X[:1])  # single image
 #model.backward_debug(X[:1], y[:1])
 
 
-model.save(path = "CNN/Model/model1")
-
+#model.save(path = "CNN/Model/model1")
+end = time.time()
 print("training time, ", end - start)
