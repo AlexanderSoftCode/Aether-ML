@@ -34,7 +34,11 @@ model.add(Layer_Dense(X.shape[1], 256, weight_regularizer_l2= 5e-5, bias_regular
 model.add(ReLU())
 model.add(Layer_Dense(256, 256, weight_regularizer_l2= 5e-5, bias_regularizer_l2= 5e-5))
 model.add(ReLU())
-model.add(Layer_Dense(256, 10, weight_regularizer_l2= 5e-5, bias_regularizer_l2= 5e-5))
+model.add(Layer_Dense(256, 256, weight_regularizer_l2= 5e-5, bias_regularizer_l2= 5e-5))
+model.add(ReLU())
+model.add(Layer_Dense(256, 32))
+model.add(ReLU())
+model.add(Layer_Dense(32, 10))
 model.add(SoftMax())
 
 model.set(
