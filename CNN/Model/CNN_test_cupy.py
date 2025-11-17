@@ -33,7 +33,11 @@ model.add(Layer_Dense(X.shape[1], 256, weight_regularizer_l2= 5e-5, bias_regular
 model.add(ReLU())
 model.add(Layer_Dense(256, 256, weight_regularizer_l2= 5e-5, bias_regularizer_l2= 5e-5))
 model.add(ReLU())
-model.add(Layer_Dense(256, 10, weight_regularizer_l2= 5e-5, bias_regularizer_l2= 5e-5))
+model.add(Layer_Dense(256, 256, weight_regularizer_l2= 5e-5, bias_regularizer_l2= 5e-5))
+model.add(ReLU())
+model.add(Layer_Dense(256, 32))
+model.add(ReLU())
+model.add(Layer_Dense(32, 10))
 model.add(SoftMax())
 
 model.set(
@@ -48,7 +52,7 @@ model.finalize()
 
 start = time.time() 
 model.train(X, y, validation_data = (X_test, y_test),
-            epochs = 10, batch_size = 128, print_every = 100)
+            epochs = 8, batch_size = 128, print_every = 100)
 end = time.time()
 
 #_ = model.forward_debug(X[:1])  # single image

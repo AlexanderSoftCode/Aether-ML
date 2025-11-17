@@ -59,7 +59,7 @@ model.add(Layer_Dense(256, 10))
 model.add(SoftMax())
 
 model.set(
-    loss = Loss_CategoricalCrossEntropy(label_smoothing= 0.02),
+    loss = Loss_CategoricalCrossEntropy(label_smoothing= 0.01),
     optimizer = Optimizer_Adam(learning_rate = 0.001, decay = 5e-5),
     accuracy = Accuracy_Categorical()
 )
@@ -85,3 +85,5 @@ print("training time, ", end - start)
 #model 4 will hold the same settings as model 2 except
 #include new loss calculation as well as label smoothing = 0.01
 #model 4 had .951 training accuracy .221 loss with validation acc .919 loss .305
+#model 5 had .952 training accuracy .281 loss with validation acc .911 loss .258
+#essentially, I fixed the issue where the model was still using label smoothing 
