@@ -281,7 +281,7 @@ class Model:
         with open(path, 'wb') as f:
             pickle.dump(self.get_parameters(), f)
     
-    def load_paramters(self, path):
+    def load_parameters(self, path):
 
         #Open a file in binary-read mode
         #and load weightss and update training layers
