@@ -1,6 +1,6 @@
 import cupy as cp
 import time
-from CNN.Model.CNN_model_cupy import *
+from CNN.models.CNN_model_cupy import *
 
 print("Cupy version")
 

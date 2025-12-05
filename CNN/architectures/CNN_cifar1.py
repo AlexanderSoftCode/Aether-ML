@@ -2,7 +2,7 @@ import cupy as cp
 import numpy as np
 import time
 import matplotlib.pyplot as plt
-from CNN.Model.CNN_model_cupy import *
+from CNN.models.CNN_model_cupy import *
 
 print("Cupy version")
 
@@ -16,7 +16,7 @@ with cp.load("data/cifar10_test.npz") as data:
 model = Model()
 
 #Add the first convolutional block
-model.add(Conv_Layer(input_shape = (32, 32, ), num_filters= 32, filter_size= (3, 3), strides= (1, 1),
+model.add(Conv_Layer(input_shape = (32, 32, 3), num_filters= 32, filter_size= (3, 3), strides= (1, 1),
                      padding= "same"))
 model.add(Batch_Norm(epsilon = 1e-5, momentum= 0.9))
 model.add(ReLU())
@@ -67,7 +67,7 @@ model.save_parameters(path = "CNN/Model/saved_models/cifar1")
 print("training time, ", end - start)
 '''
 
-model.load_parameters(path = "CNN/Model/saved_models/cifar1")
+model.load_parameters(path = "CNN/saved_models/cifar1")
 
 model.evaluate(X_val = X_test, y_val = y_test, batch_size= 128)
 #Valdiation, acc: 0.761, loss: 0.698

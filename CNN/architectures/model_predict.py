@@ -1,7 +1,7 @@
 import cupy as cp
-import time 
-
-from CNN.Model.CNN_model_cupy import *
+import numpy as np
+import matplotlib.pyplot as plt
+from CNN.models.CNN_model_cupy import *
 print("Cupy version")
 #X, y, X_test, y_test = create_data_mnist('fashion_mnist_images')
 data = cp.load("CodeTest/fashion_mnist_train_cupy.npz")
@@ -25,6 +25,7 @@ y = y[keys]
 
 X = (X.astype(cp.float32) - 127.5) / 127.5
 X_test = (X_test.astype(cp.float32) - 127.5) / 127.5
+
 model = Model()
 
 #Add the first convolutional block
@@ -66,24 +67,51 @@ model.set(
 
 model.finalize()
 
+model.load_paramters(path = "CNN/Model/model5")
+#.912 validation, .253 loss
 
-start = time.time() 
-#model.backward_debug(X[:1], y[:1])
-model.train(X, y, validation_data = (X_test, y_test),
-            epochs = 8, batch_size = 128, print_every = 100)
-end = time.time()
+# Get predictions for test set
+predictions = model.predict(X_test)
+predicted_classes = cp.argmax(predictions, axis=1)
 
+# Find correctly predicted samples
+correct_mask = predicted_classes == y_test
+correct_indices = cp.where(correct_mask)[0]
 
-model.save_parameters(path = "CNN/Model/model5")
+# Fashion MNIST class names
+class_names = ['T-shirt/top', 'Trouser', 'Pullover', 'Dress', 'Coat',
+               'Sandal', 'Shirt', 'Sneaker', 'Bag', 'Ankle boot']
 
-print("training time, ", end - start)
+# Find two samples from different classes
+selected_indices = []
+selected_classes = set()
 
-#model 3 holds .947 training accuracy and .161 loss
-#where validation was at .916 training accuracy and .247 loss. only change was .05 dropout on last layer
+for idx in correct_indices:
+    class_label = int(y_test[idx])
+    if class_label not in selected_classes:
+        selected_indices.append(int(idx))
+        selected_classes.add(class_label)
+    if len(selected_indices) == 2:
+        break
 
-#model 2 record is .946 accuracy, 1.53 loss, with validation acc .919 loss .239 
-#model 4 will hold the same settings as model 2 except
-#include new loss calculation as well as label smoothing = 0.01
-#model 4 had .951 training accuracy .221 loss with validation acc .919 loss .305
-#model 5 had .952 training accuracy .281 loss with validation acc .911 loss .258
-#essentially, I fixed the issue where the model was still using label smoothing 
+# Create visualization
+fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+
+for i, idx in enumerate(selected_indices):
+    # Get image and convert back to original scale
+    img = cp.asnumpy(X_test[idx, :, :, 0])
+    img = (img * 127.5 + 127.5).astype(np.uint8)
+    
+    true_label = int(y_test[idx])
+    pred_label = int(predicted_classes[idx])
+    confidence = float(cp.max(predictions[idx]) * 100)
+    
+    axes[i].imshow(img, cmap='gray')
+    axes[i].set_title(f'True: {class_names[true_label]}\n'
+                      f'Predicted: {class_names[pred_label]}\n'
+                      f'Confidence: {confidence:.1f}%',
+                      fontsize=25)
+    axes[i].axis('off')
+
+plt.tight_layout()
+plt.show()

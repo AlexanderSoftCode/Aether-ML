@@ -1,7 +1,7 @@
 import cupy as cp
 import time 
 
-from CNN.Model.CNN_model_cupy import *
+from CNN.models.CNN_model_cupy import *
 print("Cupy version")
 #X, y, X_test, y_test = create_data_mnist('fashion_mnist_images')
 data = cp.load("CodeTest/fashion_mnist_train_cupy.npz")

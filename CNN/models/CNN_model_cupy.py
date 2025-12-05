@@ -1,6 +1,6 @@
 import copy
 import pickle
-from CNN.Model.CNN_classes_cupy import * 
+from CNN.models.CNN_classes_cupy import * 
 
 class Model:
 
