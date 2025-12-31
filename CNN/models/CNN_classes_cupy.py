@@ -434,14 +434,12 @@ class Batch_Norm:
         if n_features is not None:
             self.gamma = cp.ones(n_features, dtype=cp.float32)
             self.beta = cp.zeros(n_features, dtype=cp.float32)
-            self.weights = self.gamma
-            self.biases = self.beta
         else:
             self.gamma = None
             self.beta = None
-            self.weights = self.gamma
-            self.biases = self.beta
-            
+
+        self.weights = self.gamma
+        self.biases = self.beta
         self.running_mean = None
         self.running_var = None
         self.weight_regularizer_l1 = 0
@@ -565,7 +563,6 @@ class SoftMax:
         return cp.argmax(outputs, axis = 1) #return the max of the rows
     
 class Loss: 
-
     def remember_trainable_layers(self, trainable_layers):
         self.trainable_layers = trainable_layers
 

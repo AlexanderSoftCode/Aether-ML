@@ -305,15 +305,15 @@ class Layer_Dropout:
         self.binary_mask = np.random.binomial(1, self.rate, size = inputs.shape) \
                         / self.rate
         self.output = self.binary_mask * self.inputs
-
+        return self.output
     def backward(self, dvalues):
         self.dinputs = dvalues * self.binary_mask 
 
 class Layer_Dropout_Spatial: 
     def __init__(self, rate):
-        
         self.rate = rate
         self.keep_prob = 1 - rate
+
     def forward(self, inputs, training):
         self.inputs = inputs
 
@@ -329,7 +329,6 @@ class Layer_Dropout_Spatial:
     
     def backward(self, dvalues): 
         self.dinputs = dvalues * self.channel_mask
-
         
 
 class ReLU:
@@ -359,27 +358,37 @@ class Leaky_ReLU:
         self.dinputs[self.inputs < 0] *= self.alpha
 
 class Batch_Norm:
-    def __init__ (self, epsilon = 1e-5, momentum = 0.9):
+    def __init__ (self, epsilon = 1e-5, momentum = 0.9, n_features = None):
         self.epsilon = epsilon
         self.momentum = momentum
-        self.gamma = None
-        self.beta = None
+        if n_features is not None:
+            self.gamma = np.ones(n_features, dtype=np.float32)
+            self.beta = np.zeros(n_features, dtype=np.float32)
+        else:
+            self.gamma = None
+            self.beta = None
+
+        self.weights = self.gamma
+        self.biases = self.beta
         self.running_mean = None
         self.running_var = None
+        self.weight_regularizer_l1 = 0
+        self.weight_regularizer_l2 = 0
+        self.bias_regularizer_l1 = 0
+        self.bias_regularizer_l2 = 0
     
     def forward(self, inputs, training):
         self.inputs = inputs
-        S = inputs.shape[0]
-        C = inputs.shape[-1]
-
-        if self.gamma is None: 
-            self.gamma = np.ones(C, dtype=np.float32)
-        if self.beta is None:
-            self.beta = np.zeros(C, dtype = np.float32)
-        if self.running_mean is None:
-            self.running_mean = np.zeros(C, dtype = np.float32)
-            self.running_var = np.ones(C, dtype = np.float32)
         
+        if self.gamma is None: 
+            C = inputs.shape[-1]
+            self.gamma = np.ones(C, dtype=np.float32)
+            self.beta = np.zeros(C, dtype=np.float32)
+            self.running_mean = np.zeros(C, dtype=np.float32)
+            self.running_var = np.ones(C, dtype=np.float32)
+            self.weights = self.gamma
+            self.biases = self.beta
+
         if inputs.ndim == 4: #if cnn
             axis = (0, 1, 2) 
         else: #dense
@@ -423,9 +432,9 @@ class Batch_Norm:
         self.dinputs = (dhatx * inv_sqrt + dvar * 2.0 * (self.inputs - self.batch_mean) / N_total \
                 + dmu / N_total)
         
-        
-        self.dgamma = np.sum(dvalues * self.normalized, axis=axes)
-        self.dbeta = np.sum(dvalues, axis=axes)
+        #formerly dgamma and dbeta
+        self.dweights = np.sum(dvalues * self.normalized, axis=axes)
+        self.dbiases = np.sum(dvalues, axis=axes)
 
         return self.dinputs 
     
@@ -443,7 +452,6 @@ class Flatten:
         self.dinputs = dvalues.reshape(self.inputs_shape)
 
 class SoftMax:
-    
     def forward(self, inputs, training):
         self.exp_values = np.exp(inputs - np.max(inputs, axis=1, keepdims = True)) #e**(inputs - max(inputs by row))
         probabilities = self.exp_values / np.sum(self.exp_values, axis=1, keepdims = True) #e**k / sum(e**k) 
@@ -469,7 +477,6 @@ class SoftMax:
         return np.argmax(outputs, axis = 1) #return the max of the rows
 
 class Loss: 
-
     def remember_trainable_layers(self, trainable_layers):
         self.trainable_layers = trainable_layers
 
@@ -516,59 +523,75 @@ class Loss:
         return regularization_loss
 
 class Loss_CategoricalCrossEntropy(Loss): 
-    def forward(self, y_pred, y_true):
-        #num samples in batch
-        samples = len(y_pred)
+    def __init__(self, label_smoothing = 0.0):
+        self.label_smoothing = label_smoothing 
 
+    def forward(self, y_pred, y_true, training = True):
+        #num samples in batch
+        n_classes = y_pred.shape[1]
         #next lets clip before continuing
         y_pred_clip = np.clip(y_pred, 1e-7, 1 - 1e-7) #.000001 -> .999999
 
-        if len(y_true.shape) == 1:                                      #scale vector [0, 1, 2]
-            correct_confidences = y_pred_clip[range(samples), y_true]
-        elif len(y_true.shape) == 2:                                    #one hot encoding [0, 1, 0] [1, 0, 0]...
-            correct_confidences = np.sum(y_pred_clip * y_true, axis=1)             #axis1 = sum rows, 
-        neg_log_likelihoods = -np.log(correct_confidences)              #-log(0,0,0,.59,0,0,0)
-        return neg_log_likelihoods
+        if len(y_true.shape) == 1:                    #scale vector [0, 1, 2]
+            y_true = np.eye(n_classes)[y_true]
+            
+        #apply label smoothing if used
+        if self.label_smoothing > 0 and training:
+            y_true = y_true * (1.0 - self.label_smoothing) + \
+                    self.label_smoothing / n_classes
+        
+        #standard CE loss
+        loss = -np.sum(y_true * np.log(y_pred_clip), axis = 1)
+        
+        return loss
     
     def backward(self, dvalues, y_true):
         samples = len(dvalues)
+        n_classes = dvalues.shape[1]
+
         #number of labels per sample
-        labels = len(dvalues[0]) 
         #if the labels are sparse turn them into one hot vector
         if len(y_true.shape) == 1:
-            y_true = np.eye(labels)[y_true] #create a lookup table of labelsxlabels with indexes y_true where y_true = 1xn 
 
-        #calculate gradient 
-        self.dinputs = -y_true / dvalues #we are dividng our true by softmax outputs. Then we get inputs. 
-        #Normalize gradient with num samples
-        self.dinputs = self.dinputs / samples
+            #create a lookup table of n_classesxnclasses
+            # with indexes y_true where y_true = 1xn 
+            y_true = np.eye(n_classes)[y_true]
+
+        #apply label smoothing again to match foward pass
+        if self.label_smoothing > 0:
+            y_true = y_true * (1.0 - self.label_smoothing) + \
+                    self.label_smoothing / n_classes
+            
+        #calculate CE gradient
+        self.dinputs = (dvalues - y_true) / samples 
 
 class Activation_Softmax_Loss_CategoricalCrossEntropy():
-    def __init__(self):
+    def __init__(self, label_smoothing = 0.0):
         self.activation = SoftMax()
-        self.loss = Loss_CategoricalCrossEntropy()
-
+        self.loss = Loss_CategoricalCrossEntropy(label_smoothing)
+        self.label_smoothing = label_smoothing
     #y_true is the vector of correct class indices, one per sample.
     #dvalues is output of softmax layer shape(n_samples, n_classes)
-    def forward(self, inputs, y_true):
+    def forward(self, inputs, y_true, training = True):
         self.activation.forward(inputs)                 #call forward function of softmax
         self.output = self.activation.output            #take the output as output of forward
-        return self.loss.calculate(self.output, y_true) #take the loss via the ouput of softmax versus true
+        return self.loss.calculate(self.output, y_true, training = training) #take the loss via the ouput of softmax versus true
     
-    def backward(self, dvalues, y_true):
+    def backward(self, dvalues, y_true, training = True):
         samples = len(dvalues)                          #For the backward note the samples
-        #If labels are one-hot encoded, 
-        #turn them into discrete values
-        if len(y_true.shape) == 2:                      #if dataset answers return one hot
-            y_true = np.argmax(y_true, axis = 1)        #take the max of the rows
+        n_classes = dvalues.shape[1]
+        
+        #if dataset is sparse, create one hot, 
+        #else if one hot already then don't convert
+        if len(y_true.shape) == 1:                      
+            y_true = np.eye(n_classes, dtype = np.float32)[y_true]
+        
+        if self.label_smoothing > 0 and training:
+            y_true = y_true * (1.0 - self.label_smoothing) \
+                            + (self.label_smoothing / n_classes)
 
-        self.dinputs = dvalues.copy() #copy 
-        #subtracts 1 from the predicted probability of the correct class for each sample.
-        #This turns the softmax outputs into the correct gradient expression
-        # (softmax - one_hot) for backpropagation.
-        self.dinputs[range(samples), y_true] -= 1
-        #normalize
-        self.dinputs = self.dinputs / samples 
+        #gradient = (p - y_smooth) where we normalize after 
+        self.dinputs = (dvalues - y_true) / samples
 
 #general starting learning rate for SGD is 1.0, with a decay down to 0.1. For Adam, a good starting 
 #LR is 0.001 (1e-3), decaying down to 0.0001 (1e-4). Different problems may require different 
