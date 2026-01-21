@@ -1,7 +1,7 @@
 #classes
 import copy
 import pickle
-from CNN.Model.CNN_classes import * 
+from CNN.models.CNN_classes import * 
 
 class Model:
 
@@ -57,12 +57,12 @@ class Model:
         if self.loss is not None:
             self.loss.remember_trainable_layers(self.trainable_layers)
 
-        
+
         if isinstance(self.layers[-1], SoftMax) and \
             isinstance(self.loss, Loss_CategoricalCrossEntropy):
             #create an object of combined activation and loss functions
             self.softmax_classifier_output = \
-            Activation_Softmax_Loss_CategoricalCrossEntropy()
+            Activation_Softmax_Loss_CategoricalCrossEntropy(self.loss.label_smoothing)
 
     def train(self, X, y, *, epochs = 1, batch_size = None, print_every = 1, validation_data = None):
 
@@ -192,12 +192,6 @@ class Model:
         for layer in reversed(self.layers):
             layer.backward(layer.next.dinputs)
             
-    def forward_debug(self, X):
-        print("Input:", X.shape)
-        for i, layer in enumerate(self.layers):
-            X = layer.forward(X, training=False)
-            print(f"After layer {i} ({layer.__class__.__name__}): {X.shape}")
-        return X
 
     def backward_debug(self, X, y):
         # Forward pass to set outputs
