@@ -169,7 +169,7 @@ class Pooling:
                 inputs.strides[0],      #step between samples
                 inputs.strides[1] * sH, #step between rows
                 inputs.strides[2] * sW, #step between columns
-                inputs.strides[1],      #Move down 1 row inside patch
+                inputs.strides[1],      #move down 1 row inside patch
                 inputs.strides[2],      #move right 1col inside patch
                 inputs.strides[3],      #step between each channel
             )
