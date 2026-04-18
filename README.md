@@ -38,7 +38,7 @@ The diagram below demonstrates an example convolutional neural network construct
 
 ```bash
 # Clone the repository
-git clone https://github.com/AlexanderSoftCode/Neural-Network.git
+git clone https://github.com/AlexanderSoftCode/Aether-ML.git
 cd Neural-Network
 
 # Create a virtual environment (optional but recommended)
