@@ -11,7 +11,7 @@ A deep learning framework built from the ground up based on two numerical librar
 
 Aether-ML implements forward and backward propagation, convolutional and fully connected networks, normalization, pooling, and losses without building directly off any existing deep learning libraries. *NumPy* provides powerful `ndarray` datatypes that vectorize operations; *CuPy* ports this existing logic to the GPU, giving the extra functionality of custom GPU kernels speeding up an already embarrassingly parallel task. 
 
-The GPU path is **NOT** a thin wrapper over vectorized array operations, and it does not rely on an `xp` alias for a unified layer pass. Instead, convolution, pooling, batch normalization, dropout, spatial dropout, loss, Adam, and AdamW each run as hand-written kernels compiled from source templates targeting both **NVIDIA** and **AMD** hardware. To combat CPU overhead, all fronts including device backend, kernel-variant selection, and layer building are all resolved ahead of time at model construction, and never re-evaluated on every call.
+The GPU path is **NOT** a thin wrapper over vectorized array operations, and it does not rely on an `xp` alias for a unified layer pass. Instead, nearly all components each run as hand-written kernels compiled from source templates targeting both **NVIDIA** and **AMD** hardware. To combat CPU overhead, all fronts including device backend, kernel-variant selection, and layer building are all resolved ahead of time at model construction, and never re-evaluated on every call.
 
 Aether-ML is an intentionally ground-up project born knowing nothing about machine-learning nor GPU kernel programming. However, rather than promote a weak mental model of machine learning and how deep learning frameworks work, the goal was to implement how deep learning runtimes work under the hood. With this approach, all system level decisions, hardware dispatch, and memory footprints had to be resolved, building real knowledge about architecting and maintaining real, production-style software.  
 
@@ -137,7 +137,7 @@ The accuracy here should converge to **75-77% test accuracy** on CIFAR-10 across
 
 Four decisions shape most of the codebase.
 
-**Resolution happens once, not per call.** `model.to()` triggers `_compile_for_device` on every layer, swapping method pointers to backend-specific implementations and selecting kernel variants ahead of time. The alternative is checking the active backend inside each forward pass, costing a branch per layer per batch, for a decision that cannot change between calls. The cost is that layers have two lifecycle phases; an uncompiled construction phase and a compiled execution phase.
+**Resolution happens once, not per call.** `model.to()` triggers `_compile_for_device` on every component, swapping method pointers to backend-specific implementations and selecting kernel variants once, ahead of time. The cost is that layers have two lifecycle phases; an uncompiled construction phase `layer.build()` and a compiled execution phase.
 
 One exception is deliberate. The `training` flag stays a plain runtime boolean, because resolving it ahead of time would double the bound variants in every layer to save tens of nanoseconds per layer.
 
@@ -147,11 +147,11 @@ One exception is deliberate. The `training` flag stays a plain runtime boolean, 
   <img alt="Architecture dispatch" src="notebooks/assets/Architecture_dispatch.png">
 </picture>
 
-**One kernel source, two vendors.** `cupy.RawKernel`s in the framework are generated from a shared template, with vendor substitution maps for CUDA and HIP supplying the divergent pieces: intrinsic names, launch geometry, matrix-core APIs. This does not affect kernel performance, only an extra step during compilation.
+**One kernel source, two vendors.** `cupy.RawKernel`s in the framework are generated from a shared template, with vendor substitution maps for CUDA and HIP supplying the divergent pieces: intrinsic names, launch geometry, matrix-core APIs. This does not affect kernel performance, but adds a extra step during compilation, and effects readability.
 
 **Kernels compile per shape, not per call.** Convolution kernels are cached on shape metadata, with filter size and stride baked in as compile-time constants rather than passed as arguments, letting the compiler unroll inner loops and fold index arithmetic. The cost is a compile on first encounter of each new shape, and a cache that grows with shape diversity, which is acceptable when shapes stay stable across thousands of training steps.
 
-**Optional components are objects, not `None`.** The `Accuracy`, `Optimizer`, `Preprocessor`, and `TrainingProgress` components all include an optional `Null` object variant. This removes `if x is not None` from the training loop, further reducing CPU overhead during training.
+**Optional components are objects, not `None`.** The `Accuracy`, `Optimizer`, `Preprocessor`, and `TrainingProgress` components all include an optional `Null` object variant. This removes `if x is not None` from the training loop, further reducing CPU overhead during the model lifecycle.
 
 ---
 
@@ -198,7 +198,7 @@ Transient VRAM footprint over two training steps. Unfused CuPy dispatches alloca
 python3 -m unittest discover tests
 ```
 
-A single invocation exercises **both the NumPy and CuPy paths**, so the dual-backend claim is verified rather than asserted. Coverage includes:
+A single line tests **both** the **NumPy** and **CuPy** backends. Some of the coverage is included below:
 
 - Numerical gradient checks on every compute layer
 - Unit tests for losses, optimizers, preprocessing transforms, and the test harness itself
@@ -216,7 +216,7 @@ A single invocation exercises **both the NumPy and CuPy paths**, so the dual-bac
 - **Two accuracy metrics**: categorical and regression.
 - **Fused kernel selection is automatic.** When CuPy is present, the fused path is used; there is no runtime switch to force the vectorized path. A workaround can still be made, but a user-facing place is not made.
 - **CI covers the CPU path only.** GitHub Actions runners have no GPU, so the CuPy and kernel tests are skipped there and verified locally.
-- **Tested on the configurations listed above.** Other devices should work, but they have not been verified.
+- **Only two tested configurations.** The listed AMD hardware, and a **RTX 3050 Mobile**.
 
 ---
 
