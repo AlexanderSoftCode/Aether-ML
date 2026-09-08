@@ -155,7 +155,7 @@ class BatchNorm(Layer):
         ) + meta["static_args"]
         self._mean_kernel(meta["grid_dim"], meta["block_dim"], kernel_args)
 
-        batch_mean = out_mean / N
+        batch_mean = out_mean / float(N)
 
         out_var = xp.zeros((C,), dtype=xp.float32)
         kernel_args = (
@@ -167,7 +167,7 @@ class BatchNorm(Layer):
         ) + meta["static_args"]
         self._var_kernel(meta["grid_dim"], meta["block_dim"], kernel_args)
 
-        batch_var = out_var / N
+        batch_var = out_var / float(N)
         inv_std = 1.0 / xp.sqrt(batch_var + self.epsilon)
 
         # Update running stats
@@ -227,7 +227,7 @@ class BatchNorm(Layer):
 
         gamma_inv_std = gamma * inv_std
         dvar_scaled = dvar * (2.0 / N)
-        dmu_over_n = dmu / N
+        dmu_over_n = dmu / float(N)
 
         self.dinputs = xp.empty_like(dvalues)
         gpu_bn._bn_backward_ew(
@@ -288,15 +288,16 @@ class BatchNorm(Layer):
             axis=axes,
             keepdims=True,
         )
+        N_total_f = float(N_total)
 
         dmu = xp.sum(dhatx * -self.inv_std, axis=axes, keepdims=True) + dvar * xp.sum(
             -2.0 * (self.inputs - self.batch_mean), axis=axes, keepdims=True
-        ) / N_total
+        ) / N_total_f
 
         self.dinputs = (
             dhatx * self.inv_std
-            + dvar * 2.0 * (self.inputs - self.batch_mean) / N_total
-            + dmu / N_total
+            + dvar * 2.0 * (self.inputs - self.batch_mean) / N_total_f
+            + dmu / N_total_f
         )
         return self.dinputs
 

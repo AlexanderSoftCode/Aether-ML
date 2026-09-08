@@ -26,7 +26,8 @@ def _fused_leaky_relu_backward(dvalues, output, alpha):
     # ensures variable-to-variable comparison, bypassing weak type-promotion logic 
     # and compiling cleanly into a branchless SIMD loop on both CUDA and HIP stacks.
     fused_zero = alpha * 0
-    return dvalues * (1.0 - (output <= fused_zero) * (1.0 - alpha))
+    result = dvalues * (1.0 - (output <= fused_zero) * (1.0 - alpha))
+    return result.astype(dvalues.dtype)
 
 class LeakyReLU(Layer):
 

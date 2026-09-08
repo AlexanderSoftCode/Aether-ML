@@ -81,9 +81,9 @@ class TestSpatialDropout(base_case.AetherBaseLayerTestCase):
     def test_forward_drops_approximately_expected_fraction(self):
         rate = 0.4
         # Pass the fixed seed directly so both CPU and GPU kernels generate deterministic masks
-        layer = self.make_built_layer(SpatialDropout, input_shape=(10, 10, 100), rate=rate, seed=self.FIXED_SEED)
+        layer = self.make_built_layer(SpatialDropout, input_shape=(2, 2, 1000), rate=rate, seed=self.FIXED_SEED)
         
-        tensor_shape = (20, 10, 10, 100)
+        tensor_shape = (50, 2, 2, 1000)
         inputs = self.xp.ones(shape=tensor_shape, dtype=self.xp.float32)
 
         output = layer.forward(inputs, training=True)
