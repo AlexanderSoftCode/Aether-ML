@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aether-ml"
-version = "0.1.0"
+version = "0.1.1"
 description = "A ground-up deep learning framework featuring vectorized neural network and CNN layers, dual NumPy/CuPy backends, and CUDA/ROCm GPU acceleration."
 readme = "README.md"
 license = "MIT"
