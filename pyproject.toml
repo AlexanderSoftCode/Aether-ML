@@ -1,31 +1,50 @@
 [build-system]
-requires = ["setuptools", "wheel"]
+requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "aether-ml"
 version = "0.1.0"
-requires-python  = ">= 3.12"
+description = "A ground-up deep learning framework featuring vectorized neural network and CNN layers, dual NumPy/CuPy backends, and CUDA/ROCm GPU acceleration."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+authors = [
+    { name = "Alexander" }
+]
+keywords = ["deep-learning", "gpu", "cuda", "rocm", "cupy", "neural-networks"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Environment :: GPU",
+]
+
 dependencies = [
-    "numpy", 
+    "numpy>=2.0.0",
+    "safetensors>=0.8.0",
 ]
 
 [project.optional-dependencies]
-safetensors = ["safetensors>=0.8.0"]
-gpu-nvidia = ["cupy-cuda12x"]   # CuPy wheel from PyPI
-gpu-amd = []                    # CuPy compiled via ROCm container env
-
-notebooks = [
-    "safetensors>=0.8.0",
-    "jupyterlab",
-    "matplotlib",
-]
+gpu-nvidia = ["cupy-cuda13x"]
+gpu-nvidia-12 = ["cupy-cuda12x"]   # CuPy wheel from PyPI
+gpu-nvidia-13 = ["cupy-cuda13x"]
+notebooks = ["jupyterlab", "matplotlib"]
 
 dev = [
-    "aether-ml[safetensors]",
     "aether-ml[notebooks]",
 ]
 
+[project.urls]
+Repository = "https://github.com/AlexanderSoftCode/Aether-ML"
+Issues = "https://github.com/AlexanderSoftCode/Aether-ML/issues"
+
 [tool.setuptools.packages.find]
-where = ["."]
-exclude = [".env*", "tests*", "*.egg-info"]
+include = ["aether*"]
+
+[tool.setuptools.package-data]
+aether = ["py.typed", "*.pyi", "**/*.pyi"]

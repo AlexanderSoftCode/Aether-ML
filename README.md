@@ -5,6 +5,7 @@ A deep learning framework built from the ground up based on two numerical librar
 [![tests (CPU)](https://github.com/AlexanderSoftCode/Aether-ML/actions/workflows/tests.yml/badge.svg)](https://github.com/AlexanderSoftCode/Aether-ML/actions/workflows/tests.yml)
 [![Python Version](https://img.shields.io/badge/python-3.12%20%7C%203.13%20%7C%203.14-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![AMD ROCm](https://img.shields.io/badge/ROCm-AMD-ED1C24?logo=amd&logoColor=white)](https://rocm.docs.amd.com/)
+[![NVIDIA CUDA](https://img.shields.io/badge/CUDA-NVIDIA-76B900?logo=nvidia&logoColor=white)](https://developer.nvidia.com/cuda-zone)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## Why Aether-ML?
@@ -15,7 +16,7 @@ The GPU path is **NOT** a thin wrapper over vectorized array operations, and it 
 
 Aether-ML is an intentionally ground-up project born knowing nothing about machine-learning nor GPU kernel programming. However, rather than promote a weak mental model of machine learning and how deep learning frameworks work, the goal was to implement how deep learning runtimes work under the hood. With this approach, all system level decisions, hardware dispatch, and memory footprints had to be resolved, building real knowledge about architecting and maintaining real, production-style software.  
 
-![Training Demo](notebooks/assets/cifar10_demo.webp)
+![Training Demo](https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/cifar10_demo.webp)
 
 ---
 
@@ -58,7 +59,7 @@ pip install cupy-cuda13x # Best for Turing and newer
 
 ## Quickstart 
 
-![alt text](notebooks/assets/ExampleCNN.png)
+![Example CNN Architecture](https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/ExampleCNN.png)
 
 A complete model lifecycle, from construction to a saved model.
 <details>
@@ -142,9 +143,9 @@ Four decisions shape most of the codebase.
 One exception is deliberate. The `training` flag stays a plain runtime boolean, because resolving it ahead of time would double the bound variants in every layer to save tens of nanoseconds per layer.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="notebooks/assets/Architecture_dispatch_dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="notebooks/assets/Architecture_dispatch.png">
-  <img alt="Architecture dispatch" src="notebooks/assets/Architecture_dispatch.png">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/Architecture_dispatch_dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/Architecture_dispatch.png">
+  <img alt="Architecture dispatch" src="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/Architecture_dispatch.png">
 </picture>
 
 **One kernel source, two vendors.** `cupy.RawKernel`s in the framework are generated from a shared template, with vendor substitution maps for CUDA and HIP supplying the divergent pieces: intrinsic names, launch geometry, matrix-core APIs. This does not affect kernel performance, but adds a extra step during compilation, and effects readability.
@@ -163,9 +164,9 @@ All figures below come from the same CNN, the same CIFAR-10 batches, the same se
 Four paths are tested; NumPy on CPU, legacy pre-refactor GPU implementation, vectorized CuPy without custom kernels, and the fused kernel path.  
   
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="notebooks/assets/benchmark_convergence-dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="notebooks/assets/benchmark_convergence.png">
-  <img alt="Backend convergence" src="notebooks/assets/benchmark_convergence.png">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/benchmark_convergence-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/benchmark_convergence.png">
+  <img alt="Backend convergence" src="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/benchmark_convergence.png">
 </picture>
 
 ### Throughput
@@ -173,9 +174,9 @@ Four paths are tested; NumPy on CPU, legacy pre-refactor GPU implementation, vec
 Per training step: **3.17 ms** on the fused kernel path vs **52.6 ms** on vectorized CuPy on the same GPU, with **326 ms** for NumPy on CPU. With the GPU paths, the kernel work shows a **17x speedup against identical hardware running array operations**.
   
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="notebooks/assets/benchmark_throughput-dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="notebooks/assets/benchmark_throughput.png">
-  <img alt="Backend throughput" src="notebooks/assets/benchmark_throughput.png">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/benchmark_throughput-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/benchmark_throughput.png">
+  <img alt="Backend throughput" src="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/benchmark_throughput.png">
 </picture>
 
 ### Transient VRAM 
@@ -183,9 +184,9 @@ Per training step: **3.17 ms** on the fused kernel path vs **52.6 ms** on vector
 Transient VRAM footprint over two training steps. Unfused CuPy dispatches allocate independent temporary buffers in VRAM for intermediate steps, resulting in transient spikes up to **180 MiB**. Custom fused kernels eliminate the need to create temporary buffers by executing multiple actions in the same kernel within registers and shared memory, reducing peak transient VRAM by **5.6×** (32.0 MiB peak).  
   
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="notebooks/assets/benchmark_vram-dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="notebooks/assets/benchmark_vram.png">
-  <img alt="Transient VRAM usage" src="notebooks/assets/benchmark_vram.png">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/benchmark_vram-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/benchmark_vram.png">
+  <img alt="Transient VRAM usage" src="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/benchmark_vram.png">
 </picture>
 
 **On the legacy series.** "Legacy CuPy" contains a `float64` type promotion bug that was found during the rewrite. GPUs often have very few or no FP64 ALUs, which explains the slowdown. The pathway is still included as an honest before-and-after, and not as a competitive baseline.
