@@ -1,0 +1,251 @@
+name: release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build distributions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install build twine
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      - name: Validate metadata and README rendering
+        run: twine check --strict dist/*
+
+      - name: Verify tag matches declared version
+        if: github.event_name == 'release'
+        run: |
+          python - <<'PY'
+          import os, pathlib, tomllib
+
+          pyproject = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
+          declared = pyproject["project"]["version"]
+          tag = os.environ["RELEASE_TAG"].lstrip("v")
+
+          if declared != tag:
+              raise SystemExit(
+                  f"version mismatch: pyproject.toml declares {declared!r} "
+                  f"but the release is tagged {tag!r}. Publishing would ship "
+                  f"the wrong version number under this tag."
+              )
+          print(f"tag and declared version agree: {declared}")
+          PY
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+
+      - name: Verify type stubs are present in the wheel
+        run: |
+          python - <<'PY'
+          import pathlib, sys, zipfile
+
+          wheel = next(pathlib.Path("dist").glob("*.whl"))
+          names = zipfile.ZipFile(wheel).namelist()
+
+          repo_stubs = {
+              str(p.relative_to(".")) for p in pathlib.Path("aether").rglob("*.pyi")
+          }
+          wheel_stubs = {n for n in names if n.endswith(".pyi")}
+
+          missing = {s for s in repo_stubs if s not in wheel_stubs}
+          if missing:
+              raise SystemExit(
+                  f"{len(missing)} stub file(s) missing from the wheel: "
+                  f"{sorted(missing)[:5]} - check "
+                  f"[tool.setuptools.package-data] in pyproject.toml"
+              )
+
+          if repo_stubs and not any(n.endswith("py.typed") for n in names):
+              raise SystemExit(
+                  "aether/py.typed is absent from the wheel - type checkers "
+                  "will ignore the stubs entirely (PEP 561)"
+              )
+
+          print(f"{len(wheel_stubs)} stub file(s) and py.typed present")
+          PY
+
+      - name: Confirm no stray packages were captured
+        run: |
+          python - <<'PY'
+          import pathlib, zipfile
+
+          wheel = next(pathlib.Path("dist").glob("*.whl"))
+          tops = {
+              n.split("/")[0]
+              for n in zipfile.ZipFile(wheel).namelist()
+              if "/" in n
+          }
+          allowed = {"aether"} | {t for t in tops if t.endswith(".dist-info")}
+
+          if stray := tops - allowed:
+              raise SystemExit(
+                  f"unexpected top-level entries in the wheel: {sorted(stray)} - "
+                  f"tighten [tool.setuptools.packages.find]"
+              )
+          print(f"wheel contains only: {sorted(tops)}")
+          PY
+
+      - name: Store distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  verify:
+    name: Verify wheel on Python ${{ matrix.python-version }}
+    needs: [build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Install the wheel
+        run: |
+          python -m pip install --upgrade pip
+          pip install dist/*.whl
+          pip check
+
+      - name: Stage tests outside the source tree
+        run: |
+          mkdir -p "${RUNNER_TEMP}/verify"
+          cp -r tests "${RUNNER_TEMP}/verify/"
+
+      - name: Confirm the installed package is not shadowed
+        working-directory: ${{ runner.temp }}/verify
+        run: |
+          python - <<'PY'
+          import aether as ae
+
+          if "site-packages" not in ae.__file__:
+              raise SystemExit(
+                  f"aether resolved to {ae.__file__} - the source tree is "
+                  f"shadowing the installed wheel, so nothing here is being "
+                  f"verified"
+              )
+          print(f"aether from {ae.__file__} (version {ae.__version__})")
+          PY
+
+      - name: Import every submodule without a GPU backend
+        working-directory: ${{ runner.temp }}/verify
+        run: |
+          python - <<'PY'
+          import importlib, pkgutil, sys, traceback
+          import aether as ae
+
+          failed = []
+          for mod in pkgutil.walk_packages(ae.__path__, ae.__name__ + "."):
+              try:
+                  importlib.import_module(mod.name)
+              except Exception:
+                  failed.append(mod.name)
+                  traceback.print_exc()
+
+          if failed:
+              raise SystemExit(f"submodules failed to import: {failed}")
+
+          if "cupy" in sys.modules:
+              raise SystemExit(
+                  "cupy was imported on a CPU-only runner - some module has an "
+                  "unguarded top-level `import cupy`, so the NumPy-only install "
+                  "path is broken"
+              )
+
+          print(f"all submodules imported; backend is {ae.config.xp.__name__}")
+          PY
+
+      - name: Run test suite against the installed wheel
+        working-directory: ${{ runner.temp }}/verify
+        run: python -m unittest discover -s tests -v
+
+  publish-testpypi:
+    name: Publish to TestPyPI
+    needs: [verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/aether-ml
+
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: [publish-testpypi]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    environment:
+      name: pypi
+      url: https://pypi.org/p/aether-ml
+
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1

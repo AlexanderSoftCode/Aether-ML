@@ -5,6 +5,8 @@ saved_models/
 *.npz
 **__pycache__/
 *.egg-info/
+dist/
+build/
 .devcontainer/.cupy_cache/
 .vscode/
 .venv/
