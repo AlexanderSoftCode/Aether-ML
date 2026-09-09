@@ -6,7 +6,11 @@ from aether.custom_kernels import pooling_kernel as gpu_pooling
 from aether.custom_kernels.launch_math import _compute_magic_numbers 
 
 class _PoolNd(Layer):
+    """Base class for MaxPool2d and AvgPool2d
 
+    Handles shared logic between build, calculating padded input,
+    and output shape calculation.
+    """
     def __init__(self):
         super().__init__()
         self._launch_cache = {}
@@ -206,6 +210,29 @@ class _PoolNd(Layer):
             "padding": self.padding
         }
 class MaxPool2d(_PoolNd):
+    """2D Max Pooling layer for spatial downsampling over NHWC inputs.
+
+    Reduces spatial dimensions (height, width) by sliding a window across the input
+    and extracting the maximum activation within each region. The operation is applied
+    independently per feature channel.
+
+    Parameters
+    ----------
+
+    filter_size : tuple of int, default=(2, 2)
+        Spatial dimensions of the pooling kernel as (height, width).
+    stride : tuple of int, default=(2, 2)
+        Stride step size along (height, width).
+    padding : {"same", "valid"}, default="same"
+        Padding mode. "same" pads the spatial borders so output dimensions scale
+        proportionally by stride; "valid" applies no padding and drops boundary 
+        pixels that do not fit a full window.
+
+    Notes
+    -----
+    Expected input shape: ``(batch_size, in_height, in_width, channels)``        
+    Output shape ``(batch_size, out_height, out_width, channels)``
+    """
     def __init__(self, filter_size = (2, 2), stride = (2,2),
                  padding = 'valid'):
 
@@ -325,7 +352,29 @@ class MaxPool2d(_PoolNd):
         return self.dinputs
 
 class AvgPool2d(_PoolNd):
+    """2D Average Pooling layer for spatial downsampling over NHWC inputs.
 
+    Reduces spatial dimensions (height, width) by sliding a window across the input
+    and computing the mean activation within each region. The operation is applied
+    independently per feature channel.
+
+    Parameters
+    ----------
+
+    filter_size : tuple of int, default=(2, 2)
+        Spatial dimensions of the pooling kernel as (height, width).
+    stride : tuple of int, default=(2, 2)
+        Stride step size along (height, width).
+    padding : {"same", "valid"}, default="same"
+        Padding mode. "same" pads the spatial borders so output dimensions scale
+        proportionally by stride; "valid" applies no padding and drops boundaryboundary 
+        pixels that do not fit a full window.
+
+    Notes
+    -----
+    Expected input shape: ``(batch_size, in_height, in_width, channels)``        
+    Output shape ``(batch_size, out_height, out_width, channels)``
+    """
     def __init__(self, filter_size = (2, 2), stride = (2,2),
                  padding = 'valid'):
 
@@ -471,6 +520,19 @@ class AvgPool2d(_PoolNd):
             return self.dinputs
 
 class GlobalAvgPool(Layer):
+    """
+    Global Average Pooling for NHWC inputs. 
+    
+    Reduces the feature channel to a single scaler by computing the
+    mean over all spatial dimensions (height and width), collpasing 4D input 
+    dimensions into 2D feature representations.
+
+    Notes
+    -----
+    Expected input shape: ``(batch_size, height, width, channels)``        
+    Output shape ``(batch_size, channels)``
+    
+    """
     def __init__(self):
         super().__init__()
         self._launch_cache = {}

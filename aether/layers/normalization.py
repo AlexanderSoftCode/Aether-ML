@@ -4,6 +4,36 @@ from aether.base import Layer
 import aether.custom_kernels.batchnorm_kernel as gpu_bn
 
 class BatchNorm(Layer):
+    """Batch normalization layer over trailing feature channels.
+
+    Normalizes inputs across all leading batch and spatial dimensions such that
+    each feature channel along the final axis has zero mean and unit variance,
+    followed by learnable affine scaling (`gamma`) and shifting (`beta`).
+
+    Parameters
+    ----------
+    epsilon : float, default=1e-5
+        Small constant added to batch variance to prevent division by zero.
+    momentum : float, default=0.9
+        Exponential moving average decay factor for tracking running statistics:
+        ``running_stat = momentum * running_stat + (1 - momentum) * batch_stat``.
+
+    Notes
+    -----
+    - **Expected layout:** Channels-last. Operates over 2D inputs of shape
+      ``(batch_size, n_features)`` or 4D spatial inputs of shape
+      ``(batch_size, height, width, n_channels)``.
+    - **Shape contract:**
+        - Input: ``(d_0, d_1, ..., d_{k-1}, C)``
+        - Output: ``(d_0, d_1, ..., d_{k-1}, C)`` (identical to input)
+    - **Training vs. Evaluation:**
+        - In training mode (``training=True``), mean and variance are computed
+          from the current mini-batch across all leading axes, and running
+          statistics are updated.
+        - In inference mode (``training=False``), inputs are normalized using the
+          accumulated ``running_mean`` and ``running_var``.
+    """
+    
     _precision_exempt: bool = True
     no_weight_decay: bool = True  # decaying towards zero breaks normalization math
 

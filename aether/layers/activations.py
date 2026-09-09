@@ -3,7 +3,7 @@ import aether.config as config
 from aether.base import Layer
 
 class ReLU(Layer):
-
+    """Rectified Linear Unit activation function: `f(x) = max(0, x)`."""
     def forward(self, inputs, training):
         xp = config.get_array_module(inputs)
         self.output = xp.maximum(0, inputs)
@@ -30,6 +30,16 @@ def _fused_leaky_relu_backward(dvalues, output, alpha):
     return result.astype(dvalues.dtype)
 
 class LeakyReLU(Layer):
+    """Leaky Rectified Linear Unit activation: `f(x) = max(alpha * x, x)`.
+
+    Allows a small, non-zero gradient when the unit is inactive to prevent
+    dying neurons.
+
+    Parameters
+    ----------
+    alpha : float, default=0.01
+        Slope coefficient for negative input values.
+    """
 
     def __init__(self, alpha=0.01):
         super().__init__()
@@ -77,6 +87,19 @@ class LeakyReLU(Layer):
         }
 
 class SoftMax(Layer):
+    """Softmax activation layer for multiclass probability distributions.
+
+    Applies the normalized exponential function along axis 1 using row-wise
+    maximum subtraction for numerical stability. Always computes in float32
+    precision to prevent exponentiation overflow and underflow.
+
+    Notes
+    -----
+    - **Expected input shape:** ``(batch_size, n_classes)``
+    - **Output shape:** ``(batch_size, n_classes)``
+    - **Precision policy:** Exempt from mixed-precision downcasting; forces
+      intermediate arrays and outputs to ``float32``.
+    """
     _precision_exempt = True 
     def forward(self, inputs, training=False):
         xp = config.get_array_module(inputs)
@@ -99,6 +122,7 @@ class SoftMax(Layer):
             
         sum_dvalues_output = xp.sum(dvalues * self.output, axis = -1, keepdims=True)
         self.dinputs = self.output * (dvalues - sum_dvalues_output)
+        return self.dinputs
 
     def predictions(self, outputs):
         xp = config.get_array_module(outputs)

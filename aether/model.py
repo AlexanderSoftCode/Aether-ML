@@ -90,6 +90,7 @@ class Model():
         self._rng_clock = None
 
     def add(self, layer):
+        """Appends a layer to the execution graph."""
         if self.is_finalized:   
             raise RuntimeError("Cannot modify model after finalize() has been called.")
         
@@ -104,11 +105,12 @@ class Model():
         if self.is_finalized:
             raise RuntimeError("Cannot set a new seed after finalize() has been called.")
         self._seed = int(seed)
-        return self
     
     def configure(self, loss=None, optimizer=None, accuracy=None, preprocessor=None):
-        """Configures the training components (loss, optimizer, metrics, preprocessor) for the model.
-        Utilizes strict type checking for loss, optimizer, accuracy, and preprocessor.
+        """Configures the training components (loss, optimizer, accuracy metric, preprocessor)
+        for the model.
+
+        Each argument, if provided, is validated against its expected base class.
         """
         if loss is None and optimizer is None and accuracy is None and preprocessor is None:
             raise ValueError(
@@ -152,7 +154,7 @@ class Model():
             self.preprocessor = preprocessor
 
     def _sync_device(self, target_device=None):
-        """Internal dispatch to compile all registered components into active backend."""
+        """Internal dispatch that compiles all registered components for the active backend."""
         dev = target_device or getattr(self, "device", None)
         if dev is None:
             return
@@ -172,26 +174,25 @@ class Model():
 
     def to(self, device):
         """
-        Ahead-Of-Time compilation and device migration.
+        Ahead-of-time compilation and device migration.
 
-        Configures the global execution backend (numpy or cupy) and
-        recursively prepares all components device backend, and dedicated
-        kernels if user is using cupy. As only trainable layers hold tensors and are
-        accessed during the loop, the layers are updated in place, meaning its possible
-        to use this after training for say inference.
+        Configures the global execution backend (NumPy or CuPy) and recursively
+        migrates every registered component to it, compiling dedicated kernels
+        when targeting CuPy. Only trainable layers hold tensors, so those are
+        the only ones updated in place -- meaning this can be called again
+        after training.
 
         Args:
-            device (str): The target hardware execution device 
-            ('cupy' or 'numpy)
+            device (str): The target hardware execution device, either 'cupy' or 'numpy'.
         Raises:
-            ValueError: If `device` specifies an unsupported or unconfigured backend
+            ValueError: If `device` specifies an unsupported or unconfigured backend.
         Example:
             >>> model = ae.Model()
             ... model.add(...)
             ... model.add(...)
             ... model.to("cupy")
-            ... # Now we can train and evaluate in cupy backend
-            ... model.configure
+            ... # Now we can train and evaluate on the CuPy backend
+            ... model.configure(...)
             ... model.finalize(input_shape=(...))
             ... model.train(X, y, epochs=5, shuffle=True)
             ... model.evaluate(X_val, y_val)
@@ -217,23 +218,21 @@ class Model():
 
     def set_precision(self, compute_dtype):
         """
-        Sets the target floating-point precision policy on the model and
-        dispatches it to all registered layers, skipping any layer marked with
-        the `_precision_exempt` attribute, then to the attached preprocessor,
-        which is skipped under the same flag. Normalization components -- the
-        normalization layers and `StandardScaler` -- set it, so their statistics
-        keep accumulating in single precision.
+        Sets the target floating-point precision policy on the model and dispatches
+        it to every registered layer, skipping any layer marked with the
+        `_precision_exempt` attribute, then to the attached preprocessor, which is
+        skipped under the same flag. 
 
         Args:
-            compute_dtype (str): The target floating point precision, 
-            ('float16','float32', 'float64') 
+            compute_dtype (str): The target floating-point precision -- one of
+                'float16', 'float32', or 'float64'.
         Raises:
-            TypeError: If `compute_dtype` is not an str or None
-            ValueError: If `compute_dtype` is not one of the currently supported precision
-            RuntimeError: If `compute_dtype` is not supported in NumPy
+            TypeError: If `compute_dtype` is not a str or None.
+            ValueError: If `compute_dtype` is not one of the currently supported precisions.
+            RuntimeError: If `compute_dtype` is not supported by NumPy.
         Note:
-            Method can be called before or after both Model.to and Model.finalize, but must 
-            be called before training and inference. 
+            This method can be called before or after both `Model.to()` and
+            `Model.finalize()`, but must be called before training or inference.
         """
         self.precision_policy = config.DTypePolicy(compute_dtype)
         for layer in self.layers:
@@ -319,8 +318,29 @@ class Model():
         ):
             self.preprocessor._apply_precision(precision_policy)
 
+        if getattr(self, "device", None) is None:
+            self.device = "cupy" if getattr(config.xp, "__name__") == "cupy" else "numpy"
+
         self._sync_device()
         self.is_finalized = True
+
+    def _check_ready(self, op_name, need_fitted=False):
+        """Guard shared by train/evaluate/predict: the model must be finalized,
+        and -- for evaluate/predict, which never fit on the caller's behalf --
+        the attached preprocessor must already be fitted.
+        """
+        if not self.is_finalized:
+            raise RuntimeError(
+                f"[aether] Model must be explicitly finalized before {op_name}. "
+                "Call model.finalize(input_shape) first."
+            )
+        if need_fitted and not self.preprocessor.is_fitted:
+            raise RuntimeError(
+                f"[aether] The attached preprocessing pipeline is not fitted, so {op_name} "
+                "would run on untransformed data. Fit the pipeline before attaching it "
+                "(e.g. Compose([...]).fit(X_train)), or train the model first -- "
+                "model.train() fits an unfitted pipeline automatically."
+            )
 
     def _has_pipeline(self):
         return self.preprocessor is not None and not isinstance(self.preprocessor, NullPreprocessor)
@@ -328,10 +348,8 @@ class Model():
     def _assert_pipeline_device(self, X):
         """Probe the attached pipeline once and confirm it emits on the model's device.
 
-        Transforms a single-sample slice rather than the full array: the pipeline
-        owns X's placement, so this is the only chance to catch a misconfigured
-        pipeline before a device mismatch surfaces from inside a layer's matmul as
-        an unattributable kernel error.
+        Transforms a single-sample slice X[:1] to verify pipeline device matches models
+        expected device (NumPy or CuPy) before full execution begins.
 
         Args:
             X (ndarray): The raw input array whose first sample is used as the probe.
@@ -353,7 +371,7 @@ class Model():
             )
 
     def _make_target_preparer(self, y):
-        """AOT-select the per-batch label migration callable.
+        """Select the per-batch label device before training.
 
         Slicing preserves an array's module, so whether `y` needs to move is fully
         knowable before the loop. Labels are migrated per batch rather than once
@@ -406,7 +424,7 @@ class Model():
 
     def backward(self, loss_dinputs):
         """
-        Sequentially propagate loss gradients backward through layers in reverse order 
+        Sequentially propagate loss gradients backward through layers in reverse order.
         """
         dinputs = loss_dinputs
         for layer in reversed(self.layers):
@@ -429,11 +447,11 @@ class Model():
         """
         Train the compiled neural network on dataset (X, y).
 
-        AOT scheduling to avoid python conditionals inside the main batch loops, minimizing 
-        CPU overhead
+        Resolves conditonal branches and step functions prior to the training loop,
+        avoiding Python-level conditionals inside the batch loop, keeping CPU overhead low.
 
-        If a preprocessing pipeline is attached "X" can be passed as raw data. Without a pipeline,
-        'X' and 'y' must already match model's device.
+        If a preprocessing pipeline is attached, `X` may be passed as raw data.
+        Without a pipeline, `X` and `y` must already reside on the model's device.
 
         Args:
             X (ndarray): Input features (NumPy or CuPy ndarray). Raw/un-preprocessed
@@ -441,31 +459,33 @@ class Model():
             y (ndarray): Target labels or one-hot ground truths.
             epochs (int): Number of full passes over the dataset.
             batch_size (int, optional): Mini-batch sample size. Defaults to None (full-batch).
-            shuffle (bool, optional): Permutes sample indices each epoch without copying[cite: 1].
-                Defaults to True
+            shuffle (bool, optional): Permutes sample indices each epoch without copying.
+                Defaults to True.
             print_every (int): Step interval frequency for logging telemetry.
             verbose (int, optional): Verbosity mode for training telemetry.
                 - `0`: Silent mode (no output printed).
                 - `1`: Dynamic graphical progress bar with metrics (default).
                 - `2`: Plain text summary per epoch without carriage returns/ANSI escapes.
-            validation_data (tuple, optional): Raw (X_val, y_val) tupleevaluated per epoch
-            fit_preprocessor (bool, optional): Whether to fit the preprocessor (None=if uniftted, 
-                True=always), False=never)
+            validation_data (tuple, optional): Raw (X_val, y_val) tuple evaluated per epoch.
+            fit_preprocessor (bool, optional): Whether to fit the preprocessor
+                (None=only if unfitted, True=always, False=never).
         Raises:
-            RuntimeError: If the model has not been finalized, or no loss is configured.
+            RuntimeError: If the model has not been finalized, if no loss is configured,
+                or if the attached preprocessing pipeline is still unfitted after this
+                call (e.g. `fit_preprocessor=False` was passed on a never-fitted pipeline).
             TypeError: With no pipeline attached, if `X`/`y` (or `validation_data`) do
                 not match the model's device backend. With a pipeline attached, if the
                 pipeline emits arrays on a device other than the model's.
+        Warns:
+            UserWarning: If the preprocessor was already fitted and this call re-fits
+                it anyway (e.g. `fit_preprocessor=True` on an already-fitted pipeline),
+                discarding its previous statistics.
         Note:
             - Full-dataset preprocessor fitting temporarily materializes data in memory.
             - Do not pass manually pre-transformed data if a pipeline is attached to avoid
               duplicate transformations.
         """
-        if not self.is_finalized:
-            raise RuntimeError(
-                "[aether] Model must be explicitly finalized before training. "
-                "Call model.finalize(input_shape) first."
-            )
+        self._check_ready("training")
         if self.loss is None:
             raise RuntimeError(
                 "[aether] Cannot train a model without a loss function."
@@ -478,11 +498,29 @@ class Model():
             if validation_data is not None:
                 self._assert_device_alignment(validation_data[0], validation_data[1])
 
+        was_already_fitted = self.preprocessor.is_fitted
         should_fit = (
-            not self.preprocessor.is_fitted if fit_preprocessor is None else fit_preprocessor
+            not was_already_fitted if fit_preprocessor is None else fit_preprocessor
         )
         if should_fit:
+            if was_already_fitted:
+                warnings.warn(
+                    "[aether] The attached preprocessing pipeline was already fitted, "
+                    "but train() is re-fitting it on this call's data, discarding its "
+                    "previous statistics. Pass fit_preprocessor=False to keep the "
+                    "existing fit, or ignore this warning if refitting was intentional.",
+                    UserWarning,
+                    stacklevel=2,
+                )
             self.preprocessor.fit(X)
+
+        if not self.preprocessor.is_fitted:
+            raise RuntimeError(
+                "[aether] The attached preprocessing pipeline is not fitted, so training "
+                "would run on untransformed data. Fit the pipeline before attaching it "
+                "(e.g. Compose([...]).fit(X_train)), pass fit_preprocessor=True to fit it "
+                "now, or omit fit_preprocessor to let train() fit it automatically."
+            )
 
         if has_pipeline:
             self._assert_pipeline_device(X)
@@ -538,7 +576,7 @@ class Model():
                 return data_l, reg_l, acc_l
         else:
             def run_step(batch_X, batch_y):
-                advance_rng
+                advance_rng()
                 out = forward_fn(batch_X, training=True)
                 data_l = loss.calculate(out, batch_y)
                 acc_l = accuracy.calculate(out, batch_y)
@@ -601,9 +639,9 @@ class Model():
         """
         Evaluate the model's loss and metrics on validation/test data in inference mode.
 
-        If a preprocessing pipeline is attached "X" can be passed as raw data; transforms
-        are applied per mini-batch, and 'y' is migrated automatically. Without a pipeline,
-        'X' and 'y' must already match model's device.
+        If a preprocessing pipeline is attached, `X` may be passed as raw data; its
+        transforms are applied per mini-batch, and `y` is migrated automatically.
+        Without a pipeline, `X` and `y` must already reside on the model's device.
 
         Args:
             X (ndarray): Evaluation input features (NumPy or CuPy ndarray).
@@ -624,18 +662,7 @@ class Model():
             Do not pass manually pre-transformed data if a pipeline is attached to avoid
             duplicate transformations.
         """
-        if not self.is_finalized:
-            raise RuntimeError(
-                "[aether] Model must be explicitly finalized before evaluation. "
-                "Call model.finalize(input_shape) first."
-            )
-        if not self.preprocessor.is_fitted:
-            raise RuntimeError(
-                "[aether] The attached preprocessing pipeline is not fitted, so evaluation "
-                "would run on untransformed data. Fit the pipeline before attaching it "
-                "(e.g. Compose([...]).fit(X_train)), or train the model first -- "
-                "model.train() fits an unfitted pipeline automatically."
-            )
+        self._check_ready("evaluation", need_fitted=True)
         if self._has_pipeline():
             self._assert_pipeline_device(X)
         else:
@@ -694,8 +721,8 @@ class Model():
         Automatically routes raw outputs through any fused loss activation
         (e.g., SoftMax in SoftmaxCategoricalCrossEntropy) unless raw logits are requested.
 
-        When a preprocessing pipeline is attached, `X` may be raw and un-preprocessed:
-        Without the pipeline, `X` must already match the Model's target device.
+        When a preprocessing pipeline is attached, `X` may be raw and un-preprocessed.
+        Without the pipeline, `X` must already match the model's target device.
 
         Args:
             X (ndarray): Input feature batch (NumPy or CuPy array).
@@ -713,22 +740,18 @@ class Model():
         Raises:
             RuntimeError: If model has not been explicitly finalized before calling
                 predict(), or if the attached preprocessing pipeline is unfitted.
+            TypeError: With no pipeline attached, if `X` does not match the model's
+                device backend. With a pipeline attached, if the pipeline emits
+                arrays on a device other than the model's.
         Note:
             Do not pass manually pre-transformed data if a pipeline is attached to avoid
             duplicate transformations.
         """
-        if not self.is_finalized:
-            raise RuntimeError(
-                "[aether] Model must be explicitly finalized before prediction. "
-                "Call model.finalize(input_shape) first."
-            )
-        if not self.preprocessor.is_fitted:
-            raise RuntimeError(
-                "[aether] The attached preprocessing pipeline is not fitted, so prediction "
-                "would run on untransformed data. Fit the pipeline before attaching it "
-                "(e.g. Compose([...]).fit(X_train)), or train the model first -- "
-                "model.train() fits an unfitted pipeline automatically."
-            )
+        self._check_ready("prediction", need_fitted=True)
+        if self._has_pipeline():
+            self._assert_pipeline_device(X)
+        else:
+            self._assert_device_alignment(X)
 
         num_samples = len(X)
         effective_batch_size = batch_size if batch_size is not None else num_samples

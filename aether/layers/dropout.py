@@ -63,7 +63,15 @@ class _DropoutBase(Layer):
 
 
 class Dropout(_DropoutBase):
-
+    """Applies inverted dropout to inputs during training.
+    
+    Randomly zeros individual elements with probability `1- keep_rate`
+    and scales retained elements by `1 / keep_rate` to preserve expectation.
+    
+    Notes
+    -----
+    Identity is passed during inference, skipping and dropout calculation.
+    """
     def _compile_for_device(self, device):
         """Triggered by Model.to(device) to map low-level hardware paths."""
         if device == "cupy" and gpu_dropout.is_gpu_dropout_available():
@@ -122,7 +130,16 @@ class Dropout(_DropoutBase):
 
 
 class SpatialDropout(_DropoutBase):
-    """Channel-wise dropout for NHWC feature maps."""
+    """Channel-wise dropout for NHWC feature maps.
+    
+    Drops entire 2D feature channels along the trailing axis with probability
+    `1 - keep_rate` instead of individual pixels. This promotes independence
+    across channels.
+
+    Notes
+    -----
+    Identity is passed during inference, skipping and dropout calculation.
+    """
 
     def _compile_for_device(self, device):
         """Triggered by Model.to(device) to map low-level hardware paths."""

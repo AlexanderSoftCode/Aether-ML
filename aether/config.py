@@ -1,3 +1,41 @@
+"""Aether backend configuration, hardware dispatch, and execution runtime.
+
+Central hardware abstraction layer (HAL) bridging CPU (NumPy) and GPU
+(CuPy: CUDA / ROCm-HIP) execution paths. Imported by nearly every other
+module in the framework.
+
+Backend Resolution & Array Modules
+-----------------------------------
+xp                           -- active array module (numpy or cupy), mutated by set_backend()
+HAS_CUPY / IS_HIP / IS_CUDA  -- detected hardware capability flags, resolved once at import
+get_array_module(*arrays)    -- resolves the correct xp for a given tensor (cp.get_array_module or numpy fallback)
+to_device(array, target)     -- explicit CPU<->GPU migration outside execution passes
+set_backend(name)            -- switches the global xp / as_strided at runtime
+enforce_cupy_env()           -- fail-fast guard for code paths that require GPU
+
+Precision Policies
+-------------------
+DTypePolicy                  -- decouples compute dtype (float16/32/64) from float32 param storage
+COMPUTE_DTYPE / PARAM_DTYPE  -- allowed compute dtypes / fixed master-weight dtype
+
+Kernel Compilation & Dispatch
+-------------------------------
+build_kernel(factory, name)  -- deferred JIT builder for ElementwiseKernel/ReductionKernel/RawKernel objects
+fuse_kernel(*args, **kwargs) -- decorator wrapping cp.fuse for elementwise kernels
+resolve_gpu_launch_geometry()-- CUDA vs HIP variant + recommended threads-per-block (1024 / 512)
+get_tensor_core_capable()    -- probes gfx9/11/12 (HIP) or compute capability >=70 (CUDA)
+
+RNG & Training Synchronization
+---------------------------------
+TrainingClock                -- monotonic step counter shared across a model's stochastic layers
+derive_stream_seed(seed, id) -- deterministic per-stream Philox seed via SeedSequence
+
+Architectural Invariants
+--------------------------
+- Default execution degrades to CPU/NumPy if CuPy or a supported GPU is absent.
+- Explicit GPU targets (enforce_cupy_env) fail fast rather than falling back silently.
+- Layer weights and master parameters stay float32 unless explicitly cast for compute.
+"""
 import numpy as np
 import warnings
 

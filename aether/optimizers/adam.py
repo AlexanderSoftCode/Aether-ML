@@ -74,6 +74,33 @@ class Optimizer:
 # LR is 0.001 (1e-3), decaying down to 0.0001 (1e-4). Different problems may require different 
 # values here, but these are decent to start.
 class Adam(Optimizer):
+    """Adaptive Moment Estimation (Adam) optimizer.
+
+    Updates parameters using running estimates of the first moment (mean) and
+    uncentered second moment (variance) of gradients, with bias correction applied
+    to both estimates.
+
+    Parameters
+    ----------
+    lr : float, default=0.001
+        Initial learning rate (step size).
+    decay : float, default=0.0
+        Inverse-time learning rate decay factor:
+        ``current_lr = lr / (1.0 + decay * iteration)``.
+    epsilon : float, default=1e-7
+        Small constant added to the denominator for numerical stability.
+    beta_1 : float, default=0.9
+        Exponential decay rate for first-moment momentum estimates.
+    beta_2 : float, default=0.999
+        Exponential decay rate for second-moment squared-gradient estimates.
+
+    Notes
+    -----
+    Momentum buffers are maintained in float32 precision across all execution
+    backends. Coupled L1/L2 penalties configured on registered layers are folded
+    directly into the gradient updates during the step.
+    """
+
     def __init__(self, lr=.001, decay=0., epsilon=1e-7, beta_1=0.9, beta_2=.999):
 
         super().__init__(lr, decay)
@@ -274,7 +301,34 @@ class Adam(Optimizer):
             "beta_2": float(self.beta_2),
         })
         return config
+    
 class AdamW(Adam):
+    """Adam optimizer with decoupled weight decay (AdamW).
+
+    Applies weight decay directly to parameters rather than folding it into the
+    gradient updates alongside momentum and variance tracking.
+
+    Parameters
+    ----------
+    lr : float, default=0.001
+        Initial learning rate (step size).
+    decay : float, default=0.0
+        Inverse-time learning rate decay factor.
+    epsilon : float, default=1e-7
+        Small constant added to the denominator for numerical stability.
+    beta_1 : float, default=0.9
+        Exponential decay rate for first-moment momentum estimates.
+    beta_2 : float, default=0.999
+        Exponential decay rate for second-moment squared-gradient estimates.
+    weight_decay : float, default=0.01
+        Decoupled weight decay coefficient applied directly to weights:
+        ``weights -= lr * weight_decay * weights``.
+
+    Notes
+    -----
+    Layers marking ``no_weight_decay = True`` (e.g., ``BatchNorm`` scaling and
+    shift vectors) and layer bias parameters are automatically exempt from decay.
+    """
     def __init__(self, lr=.001, decay=0., epsilon=1e-7,
                  beta_1=0.9, beta_2=.999, weight_decay=0.01):
         

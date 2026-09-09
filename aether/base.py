@@ -2,6 +2,8 @@ import numpy as np
 import aether.config as config
 
 class Layer:
+    """Abstract base class defining shape-inference, parameter routing, and
+    state manager for all network layers."""
     _precision_exempt: bool = False
     is_stochastic: bool = False
     def __init__(self):

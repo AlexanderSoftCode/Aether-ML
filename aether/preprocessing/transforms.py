@@ -1,9 +1,11 @@
+import warnings
 import numpy as np
 from typing import Sequence, Union, Tuple, Optional, Any
 import aether.config as config
 from ._utils import parse_inputs, resolve_dtypes, convert_single_tensor
 
-ALLOWED_DTYPES = {'float16', 'bfloat16', 'float32', 'float64'}
+TENSOR_DTYPES = {'float16', 'bfloat16', 'float32', 'float64'}  # valid dtypes for ToTensor/to_tensor
+STATS_DTYPES = {'float32', 'float64'}  # valid dtypes for statistics-based transforms (StandardScaler)
 
 def _dtype_name(dt):
     """JSON-safe stringification of a dtype spec (str/type/np.dtype/sequence)."""
@@ -154,6 +156,7 @@ class ToTensor(Preprocess):
         self.dtype = dtype
         self.preserve_integers = preserve_integers
         self.target_device = target_device
+        self._device_pinned = target_device is not None
 
     def transform(self, *arrays):
         """Executes tensor conversion on provided arrays using pre-configured settings.
@@ -172,7 +175,17 @@ class ToTensor(Preprocess):
         )
 
     def _compile_for_device(self, device):
-        """Model.to() owns the device target, overriding any user-set value."""
+        """Model.to() owns the device target -- it always wins, but a user who
+        explicitly pinned target_device is warned that their pin is being discarded
+        rather than having it silently overridden."""
+        if self._device_pinned and self.target_device != device:
+            warnings.warn(
+                f"[aether] ToTensor(target_device='{self.target_device}') was explicitly "
+                f"set, but model.to('{device}') overrides it -- a preprocessing "
+                "pipeline's device always follows the model. The pinned value is discarded.",
+                UserWarning,
+                stacklevel=2,
+            )
         self.target_device = device
 
     def _apply_precision(self, policy):
@@ -199,6 +212,12 @@ class StandardScaler(Preprocess):
             -None: Scaler normalaztion across all axes
             - 0: Feature-wise normalaztion across 2D tabular data (S, D).
             - (0, 1, 2): Channel-wise normalization for SHWC images (S, H, W, C):
+        dtype: Precision for the computed/stored statistics. Must be 'float32'
+            (default) or 'float64' -- mean/std are never computed or stored below
+            single precision, regardless of the input array's own dtype.
+
+    Raises:
+        ValueError: If `dtype` is given and is not 'float32' or 'float64'.
 
     Note:
         Exempt from model-driven precision dispatch due to half-precision overflow
@@ -206,6 +225,14 @@ class StandardScaler(Preprocess):
     _precision_exempt = True
 
     def __init__(self, mean=None, std=None, axis = None, dtype=None):
+        if dtype is not None:
+            dtype_name = np.dtype(dtype).name
+            if dtype_name not in STATS_DTYPES:
+                raise ValueError(
+                    f"[aether] StandardScaler dtype must be one of {sorted(STATS_DTYPES)} -- "
+                    "mean/std statistics are never computed below single (float32) "
+                    f"precision. Got '{dtype_name}'."
+                )
         self.dtype = np.dtype(dtype) if isinstance(dtype, str) else dtype
         self.axis = tuple(axis) if isinstance(axis, list) else axis
 
@@ -215,9 +242,13 @@ class StandardScaler(Preprocess):
         self.std = self._coerce(std)
 
     def _coerce(self, v):
-        if v is None or hasattr(v, "dtype"):
+        if v is None:
             return v
-        return np.asarray(v, dtype=self.dtype if self.dtype is not None else np.float32)
+        target = self.dtype if self.dtype is not None else np.float32
+        if hasattr(v, "dtype"):
+            # Below the fp32 floor (or non-float): promote. Already fp32/fp64: keep as-is.
+            return v if np.dtype(v.dtype).name in STATS_DTYPES else v.astype(target, copy=False)
+        return np.asarray(v, dtype=target)
 
     @property
     def is_fitted(self):
@@ -235,7 +266,12 @@ class StandardScaler(Preprocess):
         xp = config.get_array_module(X)
 
         if self.dtype is None:
-            self.dtype = np.float32 if np.issubdtype(X.dtype, np.integer) else X.dtype
+            # Integers and anything below the fp32 floor (float16/bfloat16) promote to
+            # float32; an incoming float32/float64 array keeps its own precision.
+            if np.issubdtype(X.dtype, np.integer) or np.dtype(X.dtype).name not in STATS_DTYPES:
+                self.dtype = np.dtype(np.float32)
+            else:
+                self.dtype = X.dtype
 
         accum_dtype = np.promote_types(self.dtype, np.float32)
         X_float = X.astype(accum_dtype, copy=False)

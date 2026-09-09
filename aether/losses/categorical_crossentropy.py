@@ -26,6 +26,11 @@ def _cce_per_sample_loss(xp, probs_clip, y_true_sparse, n_classes, label_smoothi
 
 
 class Loss:
+    """Base interface and accumulator for objective functions and regularization penalties.
+
+    Coordinates sample-loss accumulation, graph topology validation, and L1/L2
+    weight decay across registered trainable layers.
+    """
     prohibited_preceding_layers = ()  # Default: base loss forbids nothing
     has_fused_activation = False
     def __init__(self):
@@ -103,6 +108,25 @@ class Loss:
 
 
 class CategoricalCrossEntropy(Loss):
+    """Categorical cross-entropy loss for multiclass probability distributions.
+
+    Evaluates the cross-entropy objective between target class indices and predicted
+    probabilities, supporting optional label smoothing during training.
+
+    Parameters
+    ----------
+    label_smoothing : float, default=0.0
+        Smoothing factor in [0.0, 1.0). When greater than zero and in training mode,
+        replaces hard target distributions with uniform smoothing over all classes.
+
+    Notes
+    -----
+    - **Expected inputs:**
+        - ``y_pred``: Probability distributions of shape ``(batch_size, n_classes)``.
+          Must already be normalized (e.g., via preceding ``SoftMax`` layer).
+        - ``y_true``: Target labels as sparse integer indices ``(batch_size,)`` or
+          one-hot distributions ``(batch_size, n_classes)``.
+    """
     def __init__(self, label_smoothing = 0.0):
         super().__init__()
         self.label_smoothing = label_smoothing 
@@ -141,6 +165,27 @@ class CategoricalCrossEntropy(Loss):
 
 
 class SoftmaxCategoricalCrossEntropy(Loss):
+    """Fused Softmax activation and Categorical Cross-Entropy objective.
+
+    Operates directly on unnormalized network logits, evaluating cross-entropy
+    while collapsing the analytical gradient into a numerically stable difference
+    `(probs - targets) / N`.
+
+    Parameters
+    ----------
+    label_smoothing : float, default=0.0
+        Smoothing factor in [0.0, 1.0). When greater than zero and in training mode,
+        smooths the target ground truths prior to gradient calculation.
+
+    Notes
+    -----
+    - **Expected inputs:**
+        - ``logits``: Raw, unnormalized activations of shape ``(batch_size, n_classes)``.
+        - ``y_true``: Target labels as sparse integer indices ``(batch_size,)`` or
+          one-hot distributions ``(batch_size, n_classes)``.
+    - **Graph constraint:** Operates directly on logits; preceding this loss with an
+      explicit ``SoftMax`` layer is prohibited to prevent redundant double normalization.
+    """
     prohibited_preceding_layers = (SoftMax,)
     has_fused_activation = True
     def __init__(self, label_smoothing = 0.0):

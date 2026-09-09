@@ -3,7 +3,7 @@ import numpy as np
 import warnings
 import aether.config as config
 
-ALLOWED_DTYPES = {'float16', 'bfloat16', 'float32', 'float64'}
+TENSOR_DTYPES = {'float16', 'bfloat16', 'float32', 'float64'}  # valid dtypes for ToTensor/to_tensor
 
 # The four helper functions below are used by 
 # aether.preprocessing.transforms.to_tensor
@@ -15,8 +15,8 @@ def validate_dtype(dtype):
     except (TypeError, ValueError):
         dtype_name = str(dtype).split('.')[-1]
 
-    if dtype_name not in ALLOWED_DTYPES:
-        raise ValueError(f"Invalid dtype '{dtype}'. Expected one of: {sorted(ALLOWED_DTYPES)}")
+    if dtype_name not in TENSOR_DTYPES:
+        raise ValueError(f"Invalid dtype '{dtype}'. Expected one of: {sorted(TENSOR_DTYPES)}")
     if dtype_name == "float64":
         warnings.warn("float64 precision can significantly decrease speed...", UserWarning, stacklevel=3)
     return dtype
@@ -31,7 +31,7 @@ def is_dtype_like(val) -> bool:
             np.dtype(val)
             return True
         except (TypeError, ValueError):
-            return str(val).split('.')[-1] in ALLOWED_DTYPES
+            return str(val).split('.')[-1] in TENSOR_DTYPES
     return False
 
 def parse_inputs(args, kw_dtype):

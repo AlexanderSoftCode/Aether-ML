@@ -16,6 +16,11 @@ class Dense(Layer):
         L1 penalty. Pass a float for weights only, or (weight, bias).
     l2 : float or tuple, default=()
         L2 penalty. Pass a float for weights only, or (weight, bias).
+
+    Notes
+    -----
+    Expected input shape: ``(batch_size, n_inputs)``
+    Output shape: ``(batch_size, n_neurons)``
     """
 
     def __init__(self, n_inputs, n_neurons, l1=(), l2=()):
@@ -140,7 +145,14 @@ class Dense(Layer):
             self.biases = biases
 
 class Flatten(Layer):
-
+    """Flattens all trailing input dimensions into a 2D tensor
+    while preserving the batch dimension.
+    
+    Notes
+    -----
+    Expected input shape: ``(batch_size, d_1, d_2, ..., d_n)``
+    Output shape: ``(batch_size, d_1 * d_2 * ... * d_n)``
+    """
     def build(self, input_shape: tuple[int, ...], seed: int | None = None) -> tuple[int, ...]:    
         super().build(input_shape)
         self.input_shape = input_shape 
