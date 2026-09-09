@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aether-ml"
-version = "0.1.1"
+version = "1.0.0"
 description = "A ground-up deep learning framework featuring vectorized neural network and CNN layers, dual NumPy/CuPy backends, and CUDA/ROCm GPU acceleration."
 readme = "README.md"
 license = "MIT"
@@ -29,15 +29,11 @@ dependencies = [
     "safetensors>=0.8.0",
 ]
 
+# CuPy wheels from PyPI; pick the extra matching your installed CUDA toolkit.
 [project.optional-dependencies]
-gpu-nvidia = ["cupy-cuda13x"]
-gpu-nvidia-12 = ["cupy-cuda12x"]   # CuPy wheel from PyPI
+gpu-nvidia-12 = ["cupy-cuda12x"]
 gpu-nvidia-13 = ["cupy-cuda13x"]
-notebooks = ["jupyterlab", "matplotlib"]
-
-dev = [
-    "aether-ml[notebooks]",
-]
+gpu-nvidia = ["aether-ml[gpu-nvidia-13]"]
 
 [project.urls]
 Repository = "https://github.com/AlexanderSoftCode/Aether-ML"

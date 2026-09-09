@@ -411,5 +411,33 @@ class TestModelLoadBase(base_case.AetherBaseTestCase):
         self.assertGreater(load_loss, 0.0)
         self.assertAlmostEqual(orig_loss, load_loss, places=5)
         self.assertAlmostEqual(orig_acc, load_acc, places=5)
-        
+
+    # ---- regression tests ------------------
+
+    def test_save_and_load_without_explicit_extension(self):
+        """Verify model can be saved and loaded without explicitly providing .aether suffix."""
+        model = Model()
+        model.add(Dense(self.NUM_FEATURES, 16))
+        model.finalize((self.NUM_FEATURES,))
+
+        # Target path omitting .aether extension
+        target_path_no_ext = os.path.join(self.temp_dir, "model_no_ext")
+        expected_saved_file = target_path_no_ext + ".aether"
+
+        # 1. Save without extension
+        model.save(target_path_no_ext)
+        self.assertTrue(
+            os.path.isfile(expected_saved_file),
+            f"Expected archive '{expected_saved_file}' to be created on disk.",
+        )
+
+        # 2. Load without extension
+        loaded_model_no_ext = Model.load(target_path_no_ext)
+        self.assertTrue(loaded_model_no_ext.is_finalized)
+        self.assertEqual(len(loaded_model_no_ext.layers), 1)
+
+        # 3. Load with explicit extension
+        loaded_model_with_ext = Model.load(expected_saved_file)
+        self.assertTrue(loaded_model_with_ext.is_finalized)
+        self.assertEqual(len(loaded_model_with_ext.layers), 1)
 base_case.register_test_suites(globals(), TestModelLoadBase)

@@ -885,7 +885,11 @@ class Model():
 
         path = Path(filepath)
         if not path.exists():
-            raise FileNotFoundError(f"[aether] Archive '{path}' does not exist.")
+            candidate = path.with_suffix(".aether") if not path.suffix else path.with_name(path.name + ".aether")
+            if candidate.exists():
+                path = candidate
+            else:
+                raise FileNotFoundError(f"[aether] Archive '{path}' does not exist.")
 
         active_backend = "cupy" if getattr(config.xp, "__name__", "") == "cupy" else "numpy"
         target_device = device if device is not None else active_backend

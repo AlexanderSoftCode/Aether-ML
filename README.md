@@ -12,7 +12,7 @@ A deep learning framework built from the ground up based on two numerical librar
 
 Aether-ML implements forward and backward propagation, convolutional and fully connected networks, normalization, pooling, and losses without building directly off any existing deep learning libraries. *NumPy* provides powerful `ndarray` datatypes that vectorize operations; *CuPy* ports this existing logic to the GPU, giving the extra functionality of custom GPU kernels speeding up an already embarrassingly parallel task. 
 
-The GPU path is **NOT** a thin wrapper over vectorized array operations, and it does not rely on an `xp` alias for a unified layer pass. Instead, nearly all components each run as hand-written kernels compiled from source templates targeting both **NVIDIA** and **AMD** hardware. To combat CPU overhead, all fronts including device backend, kernel-variant selection, and layer building are all resolved ahead of time at model construction, and never re-evaluated on every call.
+The GPU path is **NOT** a thin wrapper over vectorized array operations, and it does not rely on an `xp` alias for a unified layer pass. Instead, nearly all components each run as hand-written kernels compiled from source templates targeting both **NVIDIA** and **AMD** hardware. To combat CPU overhead, all fronts including device backend, kernel-variant selection, and layer building are resolved ahead of time at model construction, and never re-evaluated on every call.
 
 Aether-ML is an intentionally ground-up project born knowing nothing about machine-learning nor GPU kernel programming. However, rather than promote a weak mental model of machine learning and how deep learning frameworks work, the goal was to implement how deep learning runtimes work under the hood. With this approach, all system level decisions, hardware dispatch, and memory footprints had to be resolved, building real knowledge about architecting and maintaining real, production-style software.  
 
@@ -36,24 +36,27 @@ Aether-ML is an intentionally ground-up project born knowing nothing about machi
 
 ## Installation
 
-Aether-ML requires python 3.12 or newer. It depends on NumPy and `safetensors` and runs on the CPU out of the box. For GPU accelerated workloads via CuPy, separate wheels per vendor and toolkit version, it's recommended to follow their installation steps.
+Aether-ML requires python 3.12 or newer. It depends on `NumPy` and `safetensors` and runs on the CPU out of the box. For GPU accelerated workloads via CuPy, there are separate wheels per vendor and toolkit versions, so it's recommended to consult the [CuPy installation guide](https://docs.cupy.dev/en/latest/install.html) for supported acceleration.
 
+### Basic (CPU)
 ```bash
-git clone https://github.com/AlexanderSoftCode/Aether-ML.git
-cd Aether-ML
-
-python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
-
-# Install editable package with serialization support
-pip install -e .
-
-# For NVIDIA, matching your installed CUDA toolkit; choose one wheel
-pip install cupy-cuda12x
-pip install cupy-cuda13x # Best for Turing and newer
+pip install aether-ml
 ```
 
-**AMD ROCm**: Pre-built CuPy wheels depend on a specific ROCm driver version (e.g. `pip install cupy-rocm-7-0`). Refer to the [CuPy ROCm installation guide](https://docs.cupy.dev/en/latest/install.html#using-cupy-on-amd-gpu-experimental) for supported driver targets. For users with the ROCm 7.14.x and a GPU that supports said version, the repository includes a VS Code dev container under `.devcontainer/rocm-gfx1201/` for the AMD configuration.
+
+### With GPU Acceleration
+Install a pre-configured target environment using extras. Pick the one matching your installed CUDA toolkit.
+
+```bash
+# NVIDIA CUDA 13  (gpu-nvidia is an alias for this)
+pip install "aether-ml[gpu-nvidia-13]"
+
+# NVIDIA CUDA 12
+pip install "aether-ml[gpu-nvidia-12]"
+```
+
+
+**AMD ROCm**: Pre-built CuPy wheels depend on a specific ROCm driver version (e.g. `pip install cupy-rocm-7-0`). Refer to the [CuPy ROCm installation guide](https://docs.cupy.dev/en/latest/install.html#using-cupy-on-amd-gpu-experimental) for supported driver targets. For users with the ROCm 7.14.x version and a GPU that supports said version, the repository includes a VS Code dev container under `.devcontainer/rocm-gfx1201/` for the AMD configuration.
 
 ---
 
@@ -148,7 +151,7 @@ One exception is deliberate. The `training` flag stays a plain runtime boolean, 
   <img alt="Architecture dispatch" src="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/Architecture_dispatch.png">
 </picture>
 
-**One kernel source, two vendors.** `cupy.RawKernel`s in the framework are generated from a shared template, with vendor substitution maps for CUDA and HIP supplying the divergent pieces: intrinsic names, launch geometry, matrix-core APIs. This does not affect kernel performance, but adds a extra step during compilation, and effects readability.
+**One kernel source, two vendors.** `cupy.RawKernel`s in the framework are generated from a shared template, with vendor substitution maps for CUDA and HIP supplying the divergent pieces: intrinsic names, launch geometry, matrix-core APIs. This does not affect kernel performance, but adds an extra step during compilation, and affects readability.
 
 **Kernels compile per shape, not per call.** Convolution kernels are cached on shape metadata, with filter size and stride baked in as compile-time constants rather than passed as arguments, letting the compiler unroll inner loops and fold index arithmetic. The cost is a compile on first encounter of each new shape, and a cache that grows with shape diversity, which is acceptable when shapes stay stable across thousands of training steps.
 
@@ -193,12 +196,31 @@ Transient VRAM footprint over two training steps. Unfused CuPy dispatches alloca
 
 ---
 
-## Testing
+## Building from Source
+
+The test suite requires the source repository. To set up a development checkout:
+
+```bash
+git clone https://github.com/AlexanderSoftCode/Aether-ML.git
+cd Aether-ML
+
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+
+# Core install (NumPy, safetensors) — CPU path only
+pip install -e .
+
+# Or, for the GPU path, install with the extra matching your CUDA toolkit.
+# This replaces the line above; pick one.
+pip install -e ".[gpu-nvidia-13]"
+# pip install -e ".[gpu-nvidia-12]"
+```
+
+Running the test-suite:
 
 ```bash
 python3 -m unittest discover tests
 ```
-
 A single line tests **both** the **NumPy** and **CuPy** backends. Some of the coverage is included below:
 
 - Numerical gradient checks on every compute layer
@@ -215,9 +237,9 @@ A single line tests **both** the **NumPy** and **CuPy** backends. Some of the co
 - **No learning rate scheduling**, early stopping, or checkpointing.
 - **No gradient clipping.** The numerical guards in the optimizer and loss protect against division by zero; they do not bound gradient magnitude.
 - **Two accuracy metrics**: categorical and regression.
-- **Fused kernel selection is automatic.** When CuPy is present, the fused path is used; there is no runtime switch to force the vectorized path. A workaround can still be made, but a user-facing place is not made.
+- **Fused kernel selection is automatic.** When CuPy is present, the fused path is used; there is no runtime switch to force the vectorized path.
 - **CI covers the CPU path only.** GitHub Actions runners have no GPU, so the CuPy and kernel tests are skipped there and verified locally.
-- **Only two tested configurations.** The listed AMD hardware, and a **RTX 3050 Mobile**.
+- **Only two tested configurations.** An **RX 9070 XT** on ROCm, and an **RTX 3050 Mobile** on CUDA.
 
 ---
 
