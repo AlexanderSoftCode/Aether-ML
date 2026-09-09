@@ -122,18 +122,12 @@ class TestPrecisionExemptionBase(base_case.AetherBaseTestCase):
         self.assertTrue(bool(self.xp.all(self.xp.isfinite(scaler.std))))
         self.assertGreater(float(self.xp.var(out.astype(self.xp.float32))), 0.5)
 
-    def test_constructor_pinned_float16_scaler_stays_finite(self):
-        """An explicit float16 pin is unaffected by the exemption, so fit() itself
-        has to accumulate wider than the dtype it stores."""
-        X = config.to_device(self.raw_X, target=self.backend_name).astype(
-            self.xp.float16
-        ) / self.xp.float16(255.0)
-        scaler = StandardScaler(dtype="float16").fit(X)
-
-        self.assertEqual(scaler.dtype, np.dtype("float16"))
-        self.assertEqual(scaler.mean.dtype, np.dtype("float16"))
-        self.assertTrue(bool(self.xp.all(self.xp.isfinite(scaler.std))))
-        self.assertGreater(float(self.xp.var(scaler.transform(X).astype(self.xp.float32))), 0.5)
+    def test_float16_dtype_pin_is_rejected_outright(self):
+        """StandardScaler never allows a sub-float32 dtype pin, exemption or not --
+        mean/std are never computed or stored below single precision, so a float16
+        pin can't even be constructed regardless of set_precision()."""
+        with self.assertRaises(ValueError):
+            StandardScaler(dtype="float16")
 
     # ---- Model-level dispatch ----
 

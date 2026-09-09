@@ -34,8 +34,10 @@ class TestToTensorTransform(base_case.AetherBaseTestCase):
 
     def test_validate_dtype_float64_warning(self):
         """Verify float64 raises a performance degradation UserWarning."""
-        with self.assertWarns(UserWarning):
-            validate_dtype('float64')
+        with warnings.catch_warnings():
+            warnings.simplefilter("always")
+            with self.assertWarns(UserWarning):
+                validate_dtype('float64')
 
     def test_is_dtype_like(self):
         """Verify identification of valid scalar and sequence dtypes."""
@@ -131,13 +133,53 @@ class TestToTensorTransform(base_case.AetherBaseTestCase):
     def test_compile_for_device_overrides_explicit_target_device(self):
         """Model.to() owns the device target, so it wins over a user-set value."""
         transform = ToTensor(target_device="numpy")
-        transform._compile_for_device(self.backend_name)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=UserWarning)
+            transform._compile_for_device(self.backend_name)
+
         self.assertEqual(transform.target_device, self.backend_name)
 
     def test_compile_for_device_fills_unset_target_device(self):
         transform = ToTensor()
         transform._compile_for_device(self.backend_name)
         self.assertEqual(transform.target_device, self.backend_name)
+
+    def test_compile_for_device_warns_when_overriding_a_pinned_device(self):
+        """model.to() still wins, but a user who explicitly pinned target_device
+        should be told their pin is being discarded, not have it happen silently."""
+        transform = ToTensor(target_device="numpy")
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            transform._compile_for_device("cupy")
+
+        self.assertEqual(len(caught), 1)
+        self.assertTrue(issubclass(caught[0].category, UserWarning))
+        self.assertIn("overrides it", str(caught[0].message))
+
+        # The override still happens -- model.to() remains the source of truth.
+        self.assertEqual(transform.target_device, "cupy")
+
+    def test_compile_for_device_no_warning_when_unpinned(self):
+        """No pin was ever set, so there's nothing to silently discard."""
+        transform = ToTensor()
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            transform._compile_for_device("cupy")
+
+        self.assertEqual(caught, [])
+
+    def test_compile_for_device_no_warning_when_new_device_matches_pin(self):
+        """The pinned value isn't actually being overridden, so no warning is due."""
+        transform = ToTensor(target_device="numpy")
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            transform._compile_for_device("numpy")
+
+        self.assertEqual(caught, [])
 
     def test_apply_precision_fills_unset_dtype(self):
         transform = ToTensor()

@@ -146,7 +146,13 @@ class TestModelPreprocessorBase(base_case.AetherBaseTestCase):
         model = Model()
         model.add(Dense(self.NUM_FEATURES, 2))
         model.configure(preprocessor=pipeline)
-        model.to(self.backend_name)
+
+        with warnings.catch_warnings():
+            # On the cupy backend, the pinned "numpy" target mismatches
+            # model.to("cupy") and triggers the pin-override warning -- not
+            # what this test is checking, so it's silenced here.
+            warnings.simplefilter("ignore", category=UserWarning)
+            model.to(self.backend_name)
 
         self.assertEqual(pipeline.transforms[0].target_device, self.backend_name)
 
@@ -265,18 +271,51 @@ class TestModelPreprocessorBase(base_case.AetherBaseTestCase):
         model = self.build_model(preprocessor=pipeline)
         before = float(pipeline.transforms[-1].mean.ravel()[0])
 
-        model.train(
-            self.shifted_X,
-            self.raw_y,
-            epochs=1,
-            batch_size=8,
-            verbose=0,
-            print_every=0,
-            fit_preprocessor=True,
-        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=UserWarning)
+            model.train(
+                self.shifted_X,
+                self.raw_y,
+                epochs=1,
+                batch_size=8,
+                verbose=0,
+                print_every=0,
+                fit_preprocessor=True,
+            )
         self.assertNotAlmostEqual(
             float(pipeline.transforms[-1].mean.ravel()[0]), before, places=3
         )
+
+    def test_fit_preprocessor_true_on_an_already_fitted_pipeline_warns(self):
+        """Re-fitting (and discarding) existing statistics should never be silent."""
+        pipeline = self.make_pipeline()  # fitted=True by default
+        model = self.build_model(preprocessor=pipeline)
+        self.assertTrue(pipeline.is_fitted)
+
+        with self.assertWarns(UserWarning):
+            model.train(
+                self.shifted_X,
+                self.raw_y,
+                epochs=1,
+                batch_size=8,
+                verbose=0,
+                print_every=0,
+                fit_preprocessor=True,
+            )
+
+    def test_fit_preprocessor_none_first_fit_does_not_warn(self):
+        """Auto-fitting a never-fitted pipeline is the ordinary path -- silent."""
+        pipeline = self.make_pipeline(fitted=False)
+        model = self.build_model(preprocessor=pipeline)
+        self.assertFalse(pipeline.is_fitted)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            model.train(
+                self.raw_X, self.raw_y, epochs=1, batch_size=8, verbose=0, print_every=0
+            )
+
+        self.assertEqual(caught, [])
 
     def test_fit_preprocessor_false_never_fits(self):
         pipeline = self.make_pipeline()
@@ -300,9 +339,9 @@ class TestModelPreprocessorBase(base_case.AetherBaseTestCase):
         pipeline = self.make_pipeline(fitted=False)
         model = self.build_model(preprocessor=pipeline)
 
-        # The unfitted scaler is what raises, not the guard -- the point is only
-        # that train() did not quietly fit it on the way past.
-        with self.assertRaises(ValueError):
+        # train() itself now guards this case with a clear RuntimeError (matching
+        # evaluate()/predict()) instead of quietly fitting it on the way past.
+        with self.assertRaises(RuntimeError):
             model.train(
                 self.raw_X,
                 self.raw_y,
@@ -370,8 +409,9 @@ class TestModelPreprocessorBase(base_case.AetherBaseTestCase):
         model = self.build_model(preprocessor=pipeline)
         model.predict(self.raw_X, batch_size=16)
 
-        # predict() has no device probe -- it never calls _assert_pipeline_device.
-        self.assertEqual(spy.batch_lengths, [16, 16])
+        # predict() now probes device like train()/evaluate() -- one single-sample
+        # device probe, then one call per mini-batch.
+        self.assertEqual(spy.batch_lengths, [1, 16, 16])
 
     # ---- predict() output placement ----
 

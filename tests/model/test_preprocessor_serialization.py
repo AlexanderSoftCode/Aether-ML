@@ -239,7 +239,12 @@ class TestPreprocessorSerializationBase(base_case.AetherBaseTestCase):
         model = self.build_model(preprocessor=self.make_pipeline(), device="cupy")
         model.save(self.save_path)
 
-        loaded = Model.load(self.save_path, device="numpy")
+        with warnings.catch_warnings():
+            # The restored ToTensor keeps its saved "cupy" pin, which mismatches
+            # device="numpy" here -- not what this test is checking, so it's
+            # silenced rather than left to leak into the test run.
+            warnings.simplefilter("ignore", category=UserWarning)
+            loaded = Model.load(self.save_path, device="numpy")
         scaler = loaded.preprocessor.transforms[-1]
 
         self.assertEqual(loaded.device, "numpy")

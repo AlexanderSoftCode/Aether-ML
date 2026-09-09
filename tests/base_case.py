@@ -40,6 +40,17 @@ class AetherBaseTestCase(unittest.TestCase):
         config.set_backend(backend_name=self.backend_name)
         self.xp = config.xp
 
+        # CuPy's own np.pad() shim trips NumPy 2.5's shape-assignment deprecation
+        # internally (cupy/_padding/pad.py) whenever a padded Conv/Pool layer runs
+        # on the cupy backend.
+        self._pad_warn_ctx = warnings.catch_warnings()
+        self._pad_warn_ctx.__enter__()
+        warnings.filterwarnings(
+            "ignore",
+            message=r".*Setting the shape on a NumPy array has been deprecated.*",
+            category=DeprecationWarning,
+        )
+
     def shortDescription(self):
         """Docstrings are ommitted when running verbose -v unit tests"""
         return None
@@ -98,6 +109,8 @@ class AetherBaseTestCase(unittest.TestCase):
 
     def tearDown(self):
         """Reset tracking state to system NumPy default safely between tests."""
+        if hasattr(self, "_pad_warn_ctx"):
+            self._pad_warn_ctx.__exit__(None, None, None)
         if config.HAS_CUPY:
             cp.cuda.Stream.null.synchronize()
             cp.get_default_memory_pool().free_all_blocks()

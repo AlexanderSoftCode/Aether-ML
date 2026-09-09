@@ -56,13 +56,13 @@ class TestModelCore(ModelBaseTestCase):
         self.assertIn(layer1, model.trainable_layers)
         self.assertIn(layer2, model.trainable_layers)
 
-    def test_manual_seed_fluent_and_post_finalize_guard(self):
-        """Test Model.manual_seed() fluent interface and ensure post-finalize modifications raise."""
+    def test_manual_seed_sets_in_place_and_post_finalize_guard(self):
+        """Test Model.manual_seed() mutates in place (no chaining) and ensure
+        post-finalize modifications raise."""
         model = Model()
         model.add(Dense(self.NUM_FEATURES, 8))
 
-        returned_model = model.manual_seed(1234)
-        self.assertIs(returned_model, model)
+        self.assertIsNone(model.manual_seed(1234))
         self.assertEqual(model._seed, 1234)
 
         model.finalize((self.NUM_FEATURES,))

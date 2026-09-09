@@ -294,12 +294,17 @@ class TestStandardScalerTransform(base_case.AetherBaseTestCase):
         self.assertEqual(scaler.mean.dtype, np.dtype("float16"))
         self.assertEqual(scaler.std.dtype, np.dtype("float16"))
 
-    def test_fit_accumulates_wider_than_a_float16_pin(self):
-        """Stats are stored at the pinned width but reduced at >= float32."""
-        scaler = StandardScaler(dtype="float16")
-        scaler.fit(self.xp.ones((4, 3), dtype=self.xp.float32))
+    def test_dtype_pin_below_float32_is_rejected(self):
+        """Statistics are never computed/stored below single (float32) precision."""
+        with self.assertRaises(ValueError):
+            StandardScaler(dtype="float16")
 
-        self.assertEqual(scaler.mean.dtype, np.dtype("float16"))
+    def test_fit_promotes_a_float16_input_to_float32(self):
+        """An unpinned scaler fit on float16 data still stores stats at >= float32."""
+        scaler = StandardScaler()
+        scaler.fit(self.xp.ones((4, 3), dtype=self.xp.float16))
+
+        self.assertEqual(scaler.mean.dtype, np.dtype("float32"))
         self.assertTrue(bool(self.xp.all(self.xp.isfinite(scaler.std))))
 
     # ---- dtype traps on the round-trip ----
