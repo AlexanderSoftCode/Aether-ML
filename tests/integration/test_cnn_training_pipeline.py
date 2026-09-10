@@ -57,18 +57,11 @@ class TestCnnTrainingPipeline(ModelIntegrationBaseCase):
         model = self.build_cnn_model()
         full = model.predict(self.X, batch_size=None)
         batched = model.predict(self.X, batch_size=self.BATCH_SIZE)
-        # Looser tolerance than the MLP equivalent: on GPU, Conv's
-        # matrix-core forward runs fp16 regardless of batch slicing, so
-        # small numeric drift between the two batchings is expected.
         self.xp.testing.assert_allclose(full, batched, rtol=1e-2, atol=1e-2)
 
     def test_fp16_precision_forward_produces_finite_output_on_gpu(self):
-        """Conv's GPU matrix-core forward always runs fp16 internally
-        regardless of the model's precision policy (Conv has no
-        _apply_precision override -- see Conv._forward_gpu casting inputs
-        unconditionally). This test only confirms the composition survives
-        set_precision('float16') end-to-end through Dense + Conv together,
-        not that Conv's behavior changes because of it."""
+        """confirms the composition survives set_precision('float16') end-to-end through
+        Dense + Conv together, not that Conv's behavior changes because of it."""
         if self.backend_name != "cupy":
             self.skipTest(
                 "fp16 compute path is only meaningfully exercised on the CuPy backend."
@@ -80,8 +73,7 @@ class TestCnnTrainingPipeline(ModelIntegrationBaseCase):
 
     def test_spatial_dropout_changes_output_between_train_and_eval(self):
         """Sanity check that training=True/False actually routes through
-        SpatialDropout differently, since that only shows up once it's
-        embedded in a full Model.forward() call, not in isolation."""
+        SpatialDropout differently."""
         model = self.build_cnn_model()
 
         train_out_1 = model.forward(self.X, training=True).copy()
@@ -102,10 +94,7 @@ class TestCnnTrainingPipeline(ModelIntegrationBaseCase):
 
     def test_loss_decreases_over_training_steps(self):
         """Composition-level check driven through the public Model.train()
-        API on a small fixed batch. If this fails, check how run_step()
-        feeds values into loss.backward() for the fused
-        SoftmaxCategoricalCrossEntropy path -- see
-        test_model_finalize_wiring.py notes."""
+        API on a small fixed batch."""
         model = self.build_cnn_model()
 
         model.train(

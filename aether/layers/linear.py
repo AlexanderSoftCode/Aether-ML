@@ -91,11 +91,7 @@ class Dense(Layer):
     def invalidate_shadow_caches(self):
         """
         Called by an optimizer after it writes into self.weights/self.biases'
-        underlying buffers in place (e.g. a fused GPU kernel taking the array
-        as an output pointer) -- that kind of update never goes through a
-        property setter, so _compute_cache_valid would otherwise stay True
-        and forward() would keep matmul-ing against a stale compute-precision
-        snapshot. Forces a rebuild on the next forward() that needs it.
+        underlying buffers in place
         """
         self._compute_cache_valid = False
 

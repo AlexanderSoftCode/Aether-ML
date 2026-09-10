@@ -2,10 +2,11 @@
 
 A deep learning framework built from the ground up based on two numerical libraries **NumPy** and **CuPy**, with hand written GPU kernels for both **CUDA** and **ROCm**.  
   
+[![PyPI version](https://img.shields.io/pypi/v/aether-ml.svg)](https://pypi.org/project/aether-ml/)
 [![tests (CPU)](https://github.com/AlexanderSoftCode/Aether-ML/actions/workflows/tests.yml/badge.svg)](https://github.com/AlexanderSoftCode/Aether-ML/actions/workflows/tests.yml)
 [![Python Version](https://img.shields.io/badge/python-3.12%20%7C%203.13%20%7C%203.14-blue?logo=python&logoColor=white)](https://www.python.org/)
-[![AMD ROCm](https://img.shields.io/badge/ROCm-AMD-ED1C24?logo=amd&logoColor=white)](https://rocm.docs.amd.com/)
 [![NVIDIA CUDA](https://img.shields.io/badge/CUDA-NVIDIA-76B900?logo=nvidia&logoColor=white)](https://developer.nvidia.com/cuda-zone)
+[![AMD ROCm](https://img.shields.io/badge/ROCm-AMD-ED1C24?logo=amd&logoColor=white)](https://rocm.docs.amd.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## Why Aether-ML?

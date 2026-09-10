@@ -1,3 +1,4 @@
+import warnings
 import numpy as np
 import aether.config as config
 from aether.base import Layer
@@ -22,11 +23,22 @@ class Conv2d(Layer):
         L1 penalty. Pass a float for weights only, or (weight, bias).
     l2 : float or tuple, default=()
         L2 penalty. Pass a float for weights only, or (weight, bias).
-
+    
+    Warns
+    -----
+    UserWarning
+        If the configured ``precision_policy`` requests a compute precision
+        that does not match the active execution path (e.g., requesting a dtype
+        other than ``float16`` when bound to the WMMA matrix-core path, or
+        requesting non-``float32`` when falling back to strided CPU/GPU kernels).
+    
     Notes
     -----
     Expected input shape: ``(batch_size, height, width, in_channels)``
     Output shape: ``(batch_size, out_height, out_width, out_channels)``
+
+    Conv2d's compute dtype is bounded to fp16 as WMMA kernels can't take >fp16
+    calculations, instead layer will use the fallback vectorized path.
     """
     
     def __init__(self, in_channels, out_channels = 1, filter_size = (3, 3), stride = (1, 1), padding = "same", l1=(), l2=()):
@@ -43,8 +55,13 @@ class Conv2d(Layer):
         self.forward = self._forward_fallback
         self.backward = self._backward_fallback
         self._fp16_weight_cache = None
-        self._fp16_weight_valid = False 
+        self._fp16_weight_valid = False
         self._launch_cache = {}
+        # None until _compile_for_device runs. self.forward can't stand in for
+        # this: the CPU branch there binds the same fallback __init__ does, so
+        # it can't tell "never compiled" from "compiled for CPU".
+        self._compiled_device = None
+        self._precision_warned_key = None
 
         self.weights = None
         self.biases = None
@@ -106,7 +123,65 @@ class Conv2d(Layer):
             self.forward = self._forward_fallback
             self.backward = self._backward_fallback
         # Device may have underlying weight buffers 0 force a shadow refresh
-        self._fp16_weight_valid = False 
+        self._fp16_weight_valid = False
+        self._compiled_device = device
+        # Covers set_precision() -> to(); the binding is only knowable here.
+        self._warn_if_precision_ignored()
+
+    def _apply_precision(self, policy):
+        """
+        Called on Model.set_precision(). Conv2d's kernels pin their own operand
+        dtype, so the policy is stored for introspection/serialization only --
+        _warn_if_precision_ignored is what keeps that from being silent.
+        """
+        self.precision_policy = policy or config.DTypePolicy()
+        # Before _compile_for_device runs there is no binding to check against,
+        # so defer to it rather than warning about a placeholder.
+        if self._compiled_device is not None:
+            self._warn_if_precision_ignored()
+
+    def _effective_compute_dtype(self):
+        """The dtype this layer actually multiplies in, read off the live binding."""
+        # Compare __func__: attribute access builds a fresh bound method each
+        # time, so `self.forward is self._forward_gpu` is never True.
+        is_gpu = getattr(self.forward, '__func__', None) is Conv2d._forward_gpu
+        return 'float16' if is_gpu else 'float32'
+
+    def _warn_if_precision_ignored(self):
+        """
+        Warn once per (bound path, requested dtype) when the precision policy
+        asks for something this layer's kernels can't deliver. Fires at bind
+        time only -- never from forward/backward.
+        """
+        requested = (
+            self.precision_policy.compute_dtype_name if self.precision_policy else None
+        )
+        if requested is None:
+            return
+
+        effective = self._effective_compute_dtype()
+        if requested == effective:
+            self._precision_warned_key = None
+            return
+
+        # Absorbs the to() + finalize() double-compile while still letting a
+        # genuinely different mismatch warn again.
+        key = (effective, requested)
+        if key == self._precision_warned_key:
+            return
+        self._precision_warned_key = key
+
+        path = (
+            "the matrix-core path, whose WMMA kernels take float16 operands at "
+            "the hardware level (float32 accumulate, float32 output)"
+            if effective == 'float16' else
+            "the strided fallback path, which computes in float32"
+        )
+        warnings.warn(
+            f"[aether] Conv2d: precision policy requests {requested!r}, but this "
+            f"layer is bound to {path}. The policy is ignored for this layer.",
+            UserWarning,
+        )
 
     def _refresh_fp16_weights(self, xp):
         """
