@@ -604,7 +604,7 @@ class GlobalAvgPool(Layer):
             self.backward = self._backward_fallback
 
     def _forward_gpu(self, inputs, training):
-        xp = config.xp
+        xp = config.cp
         self.inputs_shape = inputs.shape
         meta = self._get_shape_meta(self.inputs_shape)
 
@@ -616,7 +616,7 @@ class GlobalAvgPool(Layer):
         return self.output
 
     def _backward_gpu(self, dvalues):
-        xp = config.xp
+        xp = config.cp
         meta = self._get_shape_meta(self.inputs_shape)
         
         self.dinputs = xp.empty(self.inputs_shape, dtype=dvalues.dtype)

@@ -56,7 +56,7 @@ model.configure(
     loss=ae.SoftmaxCategoricalCrossEntropy(label_smoothing=0.05),
     optimizer=ae.AdamW(lr=0.001, decay=1e-4, weight_decay=0.01),
     accuracy=ae.CategoricalAccuracy(),
-    preprocessor=feature_pipeline   # Optional, see examples/cifar10/
+    preprocessor=feature_pipeline
 )
 model.to(TARGET_DEVICE)
 model.finalize(input_shape=X_train.shape[1:])

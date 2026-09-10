@@ -126,17 +126,13 @@ class Dense(Layer):
 
         if self._inputs_compute is None or self._weights_compute is None:
             raise RuntimeError(
-                "Dense.backard() called without a preceeding training=True during" \
-                "forward pass. If you are manually tracing through the layers, please" \
-                " add training=True to Dense.forward()"
+                "Dense.backward() called without a preceding training=True forward "
+                "pass. If you are manually tracing through the layers, please "
+                "add training=True to Dense.forward()"
             )
         dvalues_c = self.precision_policy.cast_to_compute(dvalues)
-
-        #Fallback, rederive from self.inputs/self.weights rather then crashing
-        inputs_c = self._inputs_compute if self._inputs_compute is not None \
-        else self.precision_policy.cast_to_compute(self.inputs)[0]
-        weights_c = self._weights_compute if self._weights_compute is not None \
-        else self.precision_policy.cast_to_compute(self.weights)[0]
+        inputs_c = self._inputs_compute
+        weights_c = self._weights_compute
 
         dweights = xp.dot(inputs_c.T, dvalues)
         dbiases = xp.sum(dvalues, axis = 0, keepdims = True)

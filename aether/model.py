@@ -27,6 +27,11 @@ _SCHEMA_MAJOR = 1
 _SCHEMA_MINOR = 1
 _SCHEMA_VERSION = f"{_SCHEMA_MAJOR}.{_SCHEMA_MINOR}"
 
+# Layers derive their RNG stream id from their graph index (0, 1, 2, ...), so the
+# per-epoch shuffle stream sits outside that range. Must be non-negative --
+# np.random.SeedSequence rejects negative entropy.
+_SHUFFLE_STREAM_ID = 0xFFFFFFFF
+
 # Preprocessors are absent: their configs nest further {class_name, config}
 # entries, so they resolve through aether.preprocessing.deserialize instead.
 _COMPONENT_NAMESPACES = {
@@ -88,6 +93,7 @@ class Model():
         self._seed = None
         self._predict_activation = None
         self._rng_clock = None
+        self._shuffle_rng = None
 
     def add(self, layer):
         """Appends a layer to the execution graph."""
@@ -96,12 +102,25 @@ class Model():
         
         if not isinstance(layer, Layer):
             raise TypeError(
-                f"Expected an instance of 'Layer', but got `{type(layer).__name__}`."
-                "Make sure the layer you are passing in inherits from aether.base.Layer"
+                f"Expected an instance of 'Layer', but got '{type(layer).__name__}'. "
+                "Make sure the layer you are passing in inherits from aether.base.Layer."
             )
         self.layers.append(layer)
 
     def manual_seed(self, seed: int):
+        """
+        Sets the base seed that drives weight initialization, dropout masks, and
+        the per-epoch training shuffle order. Must be called before `finalize()`.
+
+        Args:
+            seed (int): The base seed value.
+        Raises:
+            RuntimeError: If called after `finalize()`.
+        Note:
+            NumPy runs are bit-reproducible. CuPy runs are not bit-identical,
+            because the BatchNorm and Conv2d gradient kernels accumulate with
+            float `atomicAdd`, whose ordering varies between runs.
+        """
         if self.is_finalized:
             raise RuntimeError("Cannot set a new seed after finalize() has been called.")
         self._seed = int(seed)
@@ -121,8 +140,8 @@ class Model():
         if loss is not None:
             if not isinstance(loss, loss_module.Loss):
                 raise TypeError(
-                    f"Expected an instance of 'Loss', but got {type(loss).__name__}."
-                    "Make sure the loss your are passing in inherits from aether.losses.loss"
+                    f"Expected an instance of 'Loss', but got '{type(loss).__name__}'. "
+                    "Make sure the loss you are passing in inherits from aether.losses.Loss."
                 )
             else:
                 self.loss = loss
@@ -139,8 +158,8 @@ class Model():
         if accuracy is not None:
             if not isinstance(accuracy, metric_module.Accuracy):
                 raise TypeError(
-                    f"Object '{type(accuracy).__name__}' is not a valid accuracy metric."
-                    "Make sure the accuracy your passing in inherits from aether.metrics.accuracy"
+                    f"Object '{type(accuracy).__name__}' is not a valid accuracy metric. "
+                    "Make sure the accuracy you are passing in inherits from aether.metrics.Accuracy."
                 )
             self.accuracy = accuracy
 
@@ -178,9 +197,10 @@ class Model():
 
         Configures the global execution backend (NumPy or CuPy) and recursively
         migrates every registered component to it, compiling dedicated kernels
-        when targeting CuPy. Only trainable layers hold tensors, so those are
-        the only ones updated in place -- meaning this can be called again
-        after training.
+        when targeting CuPy. Trainable layer parameters are moved in place here;
+        optimizer state (e.g. Adam's momentum/cache buffers) is migrated by the
+        optimizer's own `_compile_for_device` -- meaning training can resume on
+        the new device, and this can be called again after training.
 
         Args:
             device (str): The target hardware execution device, either 'cupy' or 'numpy'.
@@ -261,6 +281,10 @@ class Model():
         # Reuse a clock restored by load(); otherwise start a fresh stream at step 0.
         if getattr(self, "_rng_clock", None) is None:
             self._rng_clock = config.TrainingClock()
+
+        self._shuffle_rng = np.random.default_rng(
+            config.derive_stream_seed(self._seed, _SHUFFLE_STREAM_ID)
+        )
 
         current_shape = input_shape
         for idx, layer in enumerate(self.layers):
@@ -376,7 +400,8 @@ class Model():
         Slicing preserves an array's module, so whether `y` needs to move is fully
         knowable before the loop. Labels are migrated per batch rather than once
         up front so that `train()`'s shuffled fancy-indexing keeps operating on `y`
-        in its original namespace, matching the index array drawn from `X`.
+        in `X`'s namespace (train() aligns it there first), matching the index
+        array drawn from `X`.
 
         Args:
             y (ndarray): The full target array passed to train()/evaluate().
@@ -462,6 +487,7 @@ class Model():
             shuffle (bool, optional): Permutes sample indices each epoch without copying.
                 Defaults to True.
             print_every (int): Step interval frequency for logging telemetry.
+                Ignored when `verbose=0`.
             verbose (int, optional): Verbosity mode for training telemetry.
                 - `0`: Silent mode (no output printed).
                 - `1`: Dynamic graphical progress bar with metrics (default).
@@ -488,8 +514,8 @@ class Model():
         self._check_ready("training")
         if self.loss is None:
             raise RuntimeError(
-                "[aether] Cannot train a model without a loss function."
-                "Pass in a valid loss function to model.configure(loss=...) before finalize & train"
+                "[aether] Cannot train a model without a loss function. "
+                "Pass in a valid loss function to model.configure(loss=...) before finalize & train."
             )
 
         has_pipeline = self._has_pipeline()
@@ -526,6 +552,9 @@ class Model():
             self._assert_pipeline_device(X)
 
         xp = config.get_array_module(X)
+        # A pipeline accepts X and y on different devices; shuffled batches index
+        # both with one array drawn in X's namespace, so align y to it once.
+        y = config.to_device(y, target="cupy" if xp.__name__ == "cupy" else "numpy")
 
         num_samples = len(X)
         effective_batch_size = batch_size if batch_size is not None else num_samples
@@ -554,6 +583,7 @@ class Model():
         optimizer_obj = self.optimizer
         step_optimizer = self._step_optimizer
         advance_rng = self._rng_clock.advance
+        shuffle_rng = self._shuffle_rng
         has_reg = hasattr(loss, "regularization_loss") and any(
             getattr(layer, "weight_regularizer_l1", 0.0) > 0.0
             or getattr(layer, "weight_regularizer_l2", 0.0) > 0.0
@@ -588,13 +618,14 @@ class Model():
         get_lr = lambda: getattr(optimizer_obj, "current_lr", getattr(optimizer_obj, "lr", None))
 
         progress = make_progress(verbose, train_steps, epochs, has_reg)
+        log_every = print_every if verbose else 0
 
         for epoch in range(1, epochs + 1):
             loss.new_pass()
             accuracy.new_pass()
             progress.start_epoch(epoch)
 
-            epoch_indices = xp.random.permutation(num_samples) if shuffle else None
+            epoch_indices = xp.asarray(shuffle_rng.permutation(num_samples)) if shuffle else None
 
             for step, (start_idx, end_idx) in enumerate(batch_slices):
                 batch_X, batch_y = get_batch(epoch_indices, start_idx, end_idx)
@@ -607,7 +638,7 @@ class Model():
                 progress.tick(step + 1)
 
                 # Telemetry: GPU-to-Host sync barrier strictly confined to log steps.
-                if print_every and (step % print_every == 0 or step == train_steps - 1):
+                if log_every and (step % log_every == 0 or step == train_steps - 1):
                     s_data_loss = float(data_loss)
                     s_reg_loss = float(reg_loss)
                     s_acc = float(acc_val)

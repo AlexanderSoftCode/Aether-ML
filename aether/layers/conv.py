@@ -232,6 +232,7 @@ class Conv2d(Layer):
         # Fall back if JIT failed or shape isn't supported by Matrix Cores
         if plan is None:
             self.forward = self._forward_fallback
+            self.backward = self._backward_fallback
             return self._forward_fallback(inputs, training)
 
         inputs_fp16 = inputs.astype(xp.float16, copy=False)
@@ -249,7 +250,7 @@ class Conv2d(Layer):
         return self.output
 
     def _backward_gpu(self, dvalues):
-        xp = config.xp
+        xp = config.cp
         S, H_in, W_in, C_in = self.inputs.shape
         fH, fW = self.filter_size
 

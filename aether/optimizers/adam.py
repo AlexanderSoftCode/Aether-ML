@@ -37,7 +37,8 @@ class Optimizer:
                 layer.weights, layer.weight_regularizer_l1, xp
             )
         if getattr(layer, "weight_regularizer_l2", 0.0) > 0:
-            dweights = dweights + 2.0 * layer.weight_regularizer_l2 * layer.weights
+            # d/dw of Loss.regularization_loss's 0.5 * l2 * w**2
+            dweights = dweights + layer.weight_regularizer_l2 * layer.weights
 
         if dbiases is not None:
             if getattr(layer, "bias_regularizer_l1", 0.0) > 0:
@@ -45,12 +46,16 @@ class Optimizer:
                     layer.biases, layer.bias_regularizer_l1, xp
                 )
             if getattr(layer, "bias_regularizer_l2", 0.0) > 0:
-                dbiases = dbiases + 2.0 * layer.bias_regularizer_l2 * layer.biases
+                dbiases = dbiases + layer.bias_regularizer_l2 * layer.biases
 
         return dweights, dbiases
 
     def _resolve_weight_decay(self, layer) -> float:
-        """Resolves decoupled weight decay coefficient (for AdamW-style optimizers)."""
+        """Resolves decoupled weight decay coefficient (for AdamW-style optimizers).
+
+        Layers such as BatchNorm set no_weight_decay=True, flag is set true
+        for these types of layers as otherwise we'd recieve performance degredations.
+        """
         if getattr(layer, "no_weight_decay", False):
             return 0.0
         return getattr(self, "weight_decay", 0.0)
@@ -62,12 +67,11 @@ class Optimizer:
         )
 
     def get_config(self) -> dict:
-        """Override to return constructor kwargs required to load optimzer.
+        """Override to return constructor kwargs required to load the optimizer.
         Used by Model.save() / Model.load()."""
         return {
             "lr": float(self.lr),
             "decay": float(self.decay),
-            "epsilon": float(self.epsilon),
         }
     
 # General starting learning rate for SGD is 1.0, with a decay down to 0.1. For Adam, a good starting 
@@ -130,11 +134,20 @@ class Adam(Optimizer):
                 layer.bias_momentums = xp.zeros_like(layer.biases, dtype=xp.float32)
                 layer.bias_cache = xp.zeros_like(layer.biases, dtype=xp.float32)
 
+    _moment_buffer_names = ("weight_momentums", "weight_cache", "bias_momentums", "bias_cache")
+
     def _compile_for_device(self, device):
         """
-        Triggered by Model.to(device) to bind the fused single-kernel RawKernel
-        GPU path or the fallback. 
+        Triggered by Model.to(device) to migrate momentum/cache buffers to the
+        target device, then bind the fused single-kernel RawKernel GPU path or
+        the fallback.
         """
+        for layer in self.layers:
+            for name in self._moment_buffer_names:
+                buf = getattr(layer, name, None)
+                if buf is not None:
+                    setattr(layer, name, config.to_device(buf, target=device))
+
         if device == 'cupy':
             variant, block_size = config.resolve_gpu_launch_geometry()
             kernel = gpu_adam._get_compiled_adamw_kernel(variant)
@@ -161,46 +174,6 @@ class Adam(Optimizer):
         self._step_impl(bias_correction_1, bias_correction_2)
 
         self.iterations += 1
-
-    @staticmethod
-    def _l1_subgradient(param, l1_lambda, xp):
-        """Sub-gradient of L1 regularization matching the +1-at-zero convention.
-        Used only by the CPU/NumPy fallback path -- the GPU path folds L1/L2
-        directly into the fused kernel instead (see _step_gpu / adam_kernel.py).
-        """
-        return l1_lambda * xp.where(param < 0, -1.0, 1.0).astype(param.dtype)
-
-    def _get_regularized_gradients(self, layer, xp):
-        """
-        Folds any *coupled* L1/L2 regularization configured on the
-        layer itself (weight_regularizer_l1/l2, bias_regularizer_l1/l2)
-        into dweights/dbiases. CPU fallback path only -- see note above.
-        """
-        dweights = layer.dweights
-        dbiases = layer.dbiases
-
-        if layer.weight_regularizer_l1 > 0:
-            dweights = dweights + self._l1_subgradient(layer.weights, layer.weight_regularizer_l1, xp)
-        if layer.weight_regularizer_l2 > 0:
-            dweights = dweights + layer.weight_regularizer_l2 * layer.weights
-
-        if layer.bias_regularizer_l1 > 0:
-            dbiases = dbiases + self._l1_subgradient(layer.biases, layer.bias_regularizer_l1, xp)
-        if layer.bias_regularizer_l2 > 0:
-            dbiases = dbiases + layer.bias_regularizer_l2 * layer.biases
-
-        return dweights, dbiases
-
-    def _resolve_weight_decay(self, layer):
-        """Resolves decoupled weight decay coefficient (AdamW).
-
-        Layers such as BatchNorm set no_weight_decay=True since gamma/beta
-        are 1D scale/shift parameters -- shrinking them toward zero degrades
-        the normalization math rather than regularizing anything.
-        """
-        if getattr(layer, "no_weight_decay", False):
-            return 0.0
-        return getattr(self, "weight_decay", 0.0)
 
     def _step_gpu(self, bias_correction_1, bias_correction_2, block_size):
         """
@@ -251,7 +224,6 @@ class Adam(Optimizer):
 
     def _step_fallback(self, bias_correction_1, bias_correction_2):
         """CPU / NumPy vectorized update path."""
-        xp = config.xp
         learning_rate = np.float32(self.current_lr)
         epsilon = np.float32(self.epsilon)
         beta_1 = np.float32(self.beta_1)
@@ -260,6 +232,7 @@ class Adam(Optimizer):
         one_minus_beta_2 = np.float32(1.0) - beta_2
 
         for layer in self.layers:
+            xp = config.get_array_module(layer.weights)
             dweights, dbiases = self._get_regularized_gradients(layer, xp)
 
             # Decoupled weight decay (AdamW)
@@ -297,6 +270,7 @@ class Adam(Optimizer):
     def get_config(self) -> dict:
         config = super().get_config()
         config.update({
+            "epsilon": float(self.epsilon),
             "beta_1": float(self.beta_1),
             "beta_2": float(self.beta_2),
         })

@@ -220,7 +220,7 @@ class BatchNorm(Layer):
         return output
 
     def _backward_gpu(self, dvalues):
-        xp = config.xp
+        xp = config.cp
         if not dvalues.flags.c_contiguous:
             dvalues = xp.ascontiguousarray(dvalues)
         if not self.inputs.flags.c_contiguous:

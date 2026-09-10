@@ -157,6 +157,7 @@ class ToTensor(Preprocess):
         self.preserve_integers = preserve_integers
         self.target_device = target_device
         self._device_pinned = target_device is not None
+        self._dtype_pinned = dtype is not None
 
     def transform(self, *arrays):
         """Executes tensor conversion on provided arrays using pre-configured settings.
@@ -186,19 +187,51 @@ class ToTensor(Preprocess):
                 UserWarning,
                 stacklevel=2,
             )
+            self._device_pinned = False
         self.target_device = device
 
     def _apply_precision(self, policy):
-        """Model.set_precision() only fills the cast dtype if the user has not pinned one."""
-        if self.dtype is None and policy.compute_dtype_name is not None:
-            self.dtype = policy.compute_dtype_name
+        """Model.set_precision() updates the cast dtype unless the constructor pinned one."""
+        if self._dtype_pinned or policy.compute_dtype_name is None:
+            return
+        self.dtype = policy.compute_dtype_name
 
     def get_config(self):
         return {
             "dtype": _dtype_name(self.dtype),
             "preserve_integers": self.preserve_integers,
             "target_device": self.target_device,
+            "dtype_pinned": bool(self._dtype_pinned),
+            "device_pinned": bool(self._device_pinned),
         }
+
+    @classmethod
+    def from_config(cls, cfg):
+        """Rebuilds a tensor converter, restoring the dtype and device pins exactly as they were at save time.
+
+        `get_config()` always emits `dtype` and `target_device`, including ones `set_precision()`
+        or `Model.to()` filled, so a plain `cls(**cfg)` would come back pinned and silently ignore
+        any later `Model.set_precision()` or `Model.to()` calls. The recorded pins are therefore
+        applied after construction rather than through `__init__`, which keeps derived state out
+        of the public constructor signature.
+
+        For archives saved before this change (keys missing), defaults are:
+        - dtype_pinned: treats a non-None dtype as pinned
+        - device_pinned: treats a non-None target_device as pinned
+
+        Args:
+            cfg (dict): The mapping produced by `get_config()`.
+
+        Returns:
+            ToTensor: The restored converter, pinned only if the original was.
+        """
+        cfg = dict(cfg)
+        dtype_pinned = bool(cfg.pop("dtype_pinned", cfg.get("dtype") is not None))
+        device_pinned = bool(cfg.pop("device_pinned", cfg.get("target_device") is not None))
+        tensor = cls(**cfg)
+        tensor._dtype_pinned = dtype_pinned
+        tensor._device_pinned = device_pinned
+        return tensor
 
 class StandardScaler(Preprocess):
     """

@@ -33,11 +33,13 @@ class _DropoutBase(Layer):
 
     def _bind_rng(self, *, base_seed, stream_id, clock):
         """
-        Called once by Model.finalize(). An explicit per-layer seed always wins; the
-        clock is rebound unconditionally so the model owns step advancement.
+        Called once by Model.finalize(). An explicit per-layer seed takes precedence
+        over the model seed; the graph position (stream_id) is always mixed in to ensure
+        layers never share a mask stream. The clock is rebound unconditionally so the
+        model owns step advancement.
         """
-        if self.seed is None:
-            self._seed_key = config.derive_stream_seed(base_seed, stream_id)
+        base = self.seed if self.seed is not None else base_seed
+        self._seed_key = config.derive_stream_seed(base, stream_id)
         self._clock = clock
 
     def _make_generator(self, xp, offset):
