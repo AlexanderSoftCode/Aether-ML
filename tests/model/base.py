@@ -63,8 +63,8 @@ class SpySetSeedLayer(Layer):
         
     def _bind_rng(self, *, base_seed, stream_id, clock):
         self.bind_calls.append((base_seed, stream_id))
-        if self.seed is None:
-            self._seed_key = config.derive_stream_seed(base_seed, stream_id)
+        base = self.seed if self.seed is not None else base_seed
+        self._seed_key = config.derive_stream_seed(base, stream_id)
         self._clock = clock
 
     def _set_seed(self, seed):

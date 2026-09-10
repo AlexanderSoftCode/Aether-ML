@@ -198,6 +198,18 @@ class TestModelPreprocessorBase(base_case.AetherBaseTestCase):
         self.assertTrue(np.isfinite(loss))
         self.assertGreaterEqual(acc, 0.0)
 
+    def test_pipeline_accepts_labels_on_another_device_when_shuffling(self):
+        if "cupy" not in base_case.BACKENDS_TO_TEST:
+            self.skipTest("Both backends are required to build a cross-device input.")
+
+        other = "numpy" if self.backend_name == "cupy" else "cupy"
+        model = self.build_model(preprocessor=self.make_pipeline())
+        model.train(
+            config.to_device(self.raw_X, target=self.backend_name),
+            config.to_device(self.raw_y, target=other),
+            epochs=1, batch_size=8, shuffle=True, verbose=0, print_every=0,
+        )
+
     def test_without_a_pipeline_the_strict_device_guard_is_unchanged(self):
         """Backward-compatibility contract: no pipeline means no implicit migration."""
         if "cupy" not in base_case.BACKENDS_TO_TEST:

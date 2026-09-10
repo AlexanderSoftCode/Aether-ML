@@ -91,4 +91,28 @@ class TestDeviceMigration(ModelIntegrationBaseCase):
 
         with self.assertRaises(TypeError):
             model.evaluate(X_gpu, y_gpu, verbose=False)
+
+    def test_training_resumes_after_migration_both_directions(self):
+        if not config.HAS_CUPY or self.backend_name != "cupy":
+            self.skipTest("Cross-backend migration requires CuPy to be active.")
+
+        model = self.build_cnn_model(device="cupy")
+        X_gpu, y_gpu = self.make_synthetic_image_data()
+        model.train(X_gpu, y_gpu, epochs=1, batch_size=self.BATCH_SIZE, verbose=0)
+
+        # Migrate to numpy and resume training -- optimizer moments must follow.
+        model.to("numpy")
+        X_cpu = config.to_device(X_gpu, target="numpy")
+        y_cpu = config.to_device(y_gpu, target="numpy")
+        model.train(X_cpu, y_cpu, epochs=1, batch_size=self.BATCH_SIZE, verbose=0)
+
+        for layer in model.trainable_layers:
+            self.assertIsInstance(layer.weight_momentums, np.ndarray)
+
+        # Migrate back to cupy and resume training again.
+        model.to("cupy")
+        model.train(X_gpu, y_gpu, epochs=1, batch_size=self.BATCH_SIZE, verbose=0)
+
+        for layer in model.trainable_layers:
+            self.assertIsInstance(layer.weight_momentums, self.xp.ndarray)
 register_test_suites(globals(), TestDeviceMigration)

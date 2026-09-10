@@ -1,7 +1,11 @@
+import numpy as np
+
 import aether.config as config
 import tests.base_case as base_case
 
 from aether.layers.dropout import Dropout
+from aether.model import Model
+from aether.layers.linear import Dense
 
 
 class TestDropout(base_case.AetherBaseLayerTestCase):
@@ -131,5 +135,87 @@ class TestDropout(base_case.AetherBaseLayerTestCase):
 
         self.assertEqual(layer._clock.value, 0)
         self.assertEqual(layer._active_offset, -1)
+
+    # ---- regression test for _bind_rng fix -----------------------------------
+
+    def test_explicit_seed_with_stream_id_produces_independent_masks(self):
+        """Regression: layers with explicit seed must not share a mask stream.
+
+        Before the fix, two Dropout layers with the same explicit seed (e.g. seed=7)
+        at different positions in a model would produce identical masks because
+        stream_id was ignored. After the fix, stream_id is always mixed in, so
+        masks are independent.
+
+        Note: This test always uses NumPy backend for simplicity (GPU variant skipped).
+        """
+        # Skip GPU variant; test only on NumPy
+        if config.xp != np:
+            self.skipTest("Regression test runs only on NumPy backend")
+
+        model = Model()
+        model.add(Dense(8, 16))
+        model.add(Dropout(rate=0.5, seed=7))
+        model.add(Dense(16, 16))
+        model.add(Dropout(rate=0.5, seed=7))
+        model.manual_seed(999)
+        model.finalize((8,))
+        model.to('numpy')
+
+        dropout1 = model.layers[1]
+        dropout2 = model.layers[3]
+
+        # Regression: explicit seed should take precedence, but stream_id must be mixed in.
+        # So two layers at different positions should have different seed keys.
+        self.assertNotEqual(
+            dropout1._seed_key, dropout2._seed_key,
+            msg="Two dropout layers with explicit seed=7 at different positions must have different _seed_key"
+        )
+
+        # After a forward pass, their masks should be different.
+        inputs = np.random.randn(4, 8).astype(np.float32)
+        x = inputs
+        for layer in model.layers:
+            x = layer.forward(x, training=True)
+
+        self.assertFalse(
+            np.all(dropout1.binary_mask == dropout2.binary_mask),
+            msg="Two dropout layers must produce different masks"
+        )
+
+    def test_explicit_seed_wins_over_model_seed(self):
+        """Regression: explicit per-layer seed should take precedence over model seed.
+
+        Note: This test always uses NumPy backend for simplicity (GPU variant skipped).
+        """
+        # Skip GPU variant; test only on NumPy
+        if config.xp != np:
+            self.skipTest("Regression test runs only on NumPy backend")
+
+        # Build model with model_seed=100, but explicit layer seed=7 at position 1.
+        model1 = Model()
+        model1.add(Dense(8, 16))
+        model1.add(Dropout(rate=0.5, seed=7))
+        model1.add(Dense(16, 16))
+        model1.manual_seed(100)
+        model1.finalize((8,))
+        model1.to('numpy')
+        key1 = model1.layers[1]._seed_key
+
+        # Build identical model but with model_seed=200.
+        # The Dropout(seed=7) should still have the same _seed_key because
+        # explicit seed takes precedence.
+        model2 = Model()
+        model2.add(Dense(8, 16))
+        model2.add(Dropout(rate=0.5, seed=7))
+        model2.add(Dense(16, 16))
+        model2.manual_seed(200)
+        model2.finalize((8,))
+        model2.to('numpy')
+        key2 = model2.layers[1]._seed_key
+
+        self.assertEqual(
+            key1, key2,
+            msg="Same explicit seed=7 at same position must produce same _seed_key regardless of model seed"
+        )
 
 base_case.register_test_suites(globals(), TestDropout)

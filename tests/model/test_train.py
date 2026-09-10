@@ -19,21 +19,9 @@ class TestModelTrainBase(ModelBaseTestCase):
 
     def setUp(self):
         super().setUp()
-        self.model = Model()
-        self.model.to(self.backend_name)
-        self.model.add(Dense(n_inputs= 4, n_neurons=8))
-        self.model.add(ReLU())
-        self.model.add(Dense(n_inputs = 8, n_neurons=self.NUM_CLASSES))
-
-        self.loss = CategoricalCrossEntropy()
-        self.optimizer = Adam(lr=0.01)
-        self.accuracy = CategoricalAccuracy()
-
-        self.model.configure(
-            loss=self.loss,
-            optimizer=self.optimizer,
-            accuracy=self.accuracy
-        )
+        self.model = self._make_model()
+        self.optimizer = self.model.optimizer
+        self.accuracy = self.model.accuracy
 
     def test_train_unfinalized_raises_runtime_error(self):
         with self.assertRaises(RuntimeError):
@@ -138,5 +126,71 @@ class TestModelTrainBase(ModelBaseTestCase):
             self.model.train(self.X, self.y, epochs=1, verbose=False)
         self.assertEqual(buffer.getvalue(), "")
 
+    def _make_model(self):
+        model = Model()
+        model.to(self.backend_name)
+        model.add(Dense(n_inputs=4, n_neurons=8))
+        model.add(ReLU())
+        model.add(Dense(n_inputs=8, n_neurons=self.NUM_CLASSES))
+        model.configure(
+            loss=CategoricalCrossEntropy(),
+            optimizer=Adam(lr=0.01),
+            accuracy=CategoricalAccuracy(),
+        )
+        return model
+
+    def test_seeded_shuffle_is_reproducible(self):
+        model_a = self._make_model()
+        model_b = self._make_model()
+
+        model_a.manual_seed(123)
+        model_b.manual_seed(123)
+
+        model_a.finalize(input_shape=(self.NUM_FEATURES,))
+        model_b.finalize(input_shape=(self.NUM_FEATURES,))
+
+        # batch_size=8 over NUM_SAMPLES=32 gives 4 batches/epoch, so shuffling
+        # actually reorders which samples land in which batch.
+        model_a.train(self.X, self.y, epochs=2, batch_size=8, shuffle=True, verbose=0)
+        model_b.train(self.X, self.y, epochs=2, batch_size=8, shuffle=True, verbose=0)
+
+        for layer_a, layer_b in zip(model_a.trainable_layers, model_b.trainable_layers):
+            weights_a = config.to_device(layer_a.weights, target="numpy")
+            weights_b = config.to_device(layer_b.weights, target="numpy")
+            biases_a = config.to_device(layer_a.biases, target="numpy")
+            biases_b = config.to_device(layer_b.biases, target="numpy")
+
+            if self.backend_name == "cupy":
+                np.testing.assert_allclose(weights_a, weights_b, rtol=1e-5, atol=1e-6)
+                np.testing.assert_allclose(biases_a, biases_b, rtol=1e-5, atol=1e-6)
+            else:
+                np.testing.assert_array_equal(weights_a, weights_b)
+                np.testing.assert_array_equal(biases_a, biases_b)
+
+    def test_telemetry_sync_suppressed_at_verbose_zero(self):
+        # float() on the per-step metric is a GPU->host sync; verbose=0 must skip it.
+        float_calls = []
+
+        class _Synced:
+            def __init__(self, value):
+                self.value = value
+
+            def __float__(self):
+                float_calls.append(1)
+                return float(self.value)
+
+        class SpyAccuracy(CategoricalAccuracy):
+            def calculate(self, predictions, y):
+                return _Synced(super().calculate(predictions, y))
+
+        for verbose, expect_sync in ((0, False), (2, True)):
+            with self.subTest(verbose=verbose):
+                float_calls.clear()
+                model = self._make_model()
+                model.configure(accuracy=SpyAccuracy())
+                model.finalize(input_shape=(self.NUM_FEATURES,))
+                with contextlib.redirect_stdout(io.StringIO()):
+                    model.train(self.X, self.y, epochs=1, batch_size=8, verbose=verbose, print_every=1)
+                self.assertEqual(bool(float_calls), expect_sync)
 
 register_test_suites(globals(), TestModelTrainBase)

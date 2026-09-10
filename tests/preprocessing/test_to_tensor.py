@@ -4,6 +4,7 @@ import warnings
 import numpy as np
 
 import aether.config as config
+import aether.preprocessing
 import tests.base_case as base_case
 
 from aether.preprocessing.transforms import ToTensor, to_tensor
@@ -212,8 +213,202 @@ class TestToTensorTransform(base_case.AetherBaseTestCase):
         cfg = ToTensor(dtype=np.float32, target_device="numpy").get_config()
         self.assertEqual(
             cfg,
-            {"dtype": "float32", "preserve_integers": True, "target_device": "numpy"},
+            {"dtype": "float32", "preserve_integers": True, "target_device": "numpy", "dtype_pinned": True, "device_pinned": True},
         )
+
+    # ---- Regression tests: dtype pin and multiple set_precision calls ----
+
+    def test_apply_precision_overwrites_unpinned_dtype(self):
+        """Unpinned ToTensor: successive _apply_precision calls overwrite dtype."""
+        transform = ToTensor()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            transform._apply_precision(config.DTypePolicy(compute_dtype="float16"))
+        self.assertEqual(transform.dtype, "float16")
+
+        transform._apply_precision(config.DTypePolicy(compute_dtype="float32"))
+        self.assertEqual(transform.dtype, "float32")
+
+    def test_apply_precision_preserves_pinned_dtype(self):
+        """Pinned ToTensor(dtype='float32'): _apply_precision leaves dtype alone."""
+        transform = ToTensor(dtype="float32")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            transform._apply_precision(config.DTypePolicy(compute_dtype="float16"))
+        self.assertEqual(transform.dtype, "float32")
+
+    def test_roundtrip_unpinned_but_filled_dtype(self):
+        """Unpinned ToTensor with filled dtype: roundtrip via deserialize preserves pin state."""
+        transform = ToTensor()
+        transform._apply_precision(config.DTypePolicy(compute_dtype="float32"))
+
+        cfg = transform.get_config()
+        restored = aether.preprocessing.deserialize({"class_name": "ToTensor", "config": cfg})
+
+        # After roundtrip, it should still be unpinned
+        self.assertFalse(restored._dtype_pinned)
+        self.assertEqual(restored.dtype, "float32")
+
+        # Verify another set_precision call will overwrite it
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            restored._apply_precision(config.DTypePolicy(compute_dtype="float16"))
+        self.assertEqual(restored.dtype, "float16")
+
+    def test_roundtrip_pinned_dtype(self):
+        """Pinned ToTensor: roundtrip via deserialize preserves pin state."""
+        transform = ToTensor(dtype="float32")
+
+        cfg = transform.get_config()
+        restored = aether.preprocessing.deserialize({"class_name": "ToTensor", "config": cfg})
+
+        # After roundtrip, it should still be pinned
+        self.assertTrue(restored._dtype_pinned)
+        self.assertEqual(restored.dtype, "float32")
+
+        # Verify set_precision is ignored
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            restored._apply_precision(config.DTypePolicy(compute_dtype="float16"))
+        self.assertEqual(restored.dtype, "float32")
+
+    def test_roundtrip_legacy_config_without_dtype_pinned_key(self):
+        """Legacy config without dtype_pinned key: defaults to treating non-None dtype as pinned."""
+        # Simulate old config (before dtype_pinned key was added)
+        legacy_cfg = {
+            "dtype": "float32",
+            "preserve_integers": True,
+            "target_device": None,
+        }
+
+        restored = aether.preprocessing.deserialize({"class_name": "ToTensor", "config": legacy_cfg})
+
+        # Should come back pinned (since dtype is not None and key is missing)
+        self.assertTrue(restored._dtype_pinned)
+        self.assertEqual(restored.dtype, "float32")
+
+        # Verify set_precision is ignored (pinned behavior)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            restored._apply_precision(config.DTypePolicy(compute_dtype="float16"))
+        self.assertEqual(restored.dtype, "float32")
+
+    def test_roundtrip_legacy_config_with_none_dtype(self):
+        """Legacy config without dtype_pinned but dtype=None: comes back unpinned."""
+        legacy_cfg = {
+            "dtype": None,
+            "preserve_integers": True,
+            "target_device": None,
+        }
+
+        restored = aether.preprocessing.deserialize({"class_name": "ToTensor", "config": legacy_cfg})
+
+        # Should come back unpinned (since dtype is None)
+        self.assertFalse(restored._dtype_pinned)
+        self.assertIsNone(restored.dtype)
+
+        # Verify set_precision works
+        restored._apply_precision(config.DTypePolicy(compute_dtype="float32"))
+        self.assertEqual(restored.dtype, "float32")
+
+    # ---- Regression tests: device pin ----
+
+    def test_roundtrip_unpinned_but_filled_target_device(self):
+        """Unpinned ToTensor with filled target_device: roundtrip via deserialize preserves pin state."""
+        transform = ToTensor()
+        transform._compile_for_device("numpy")
+
+        cfg = transform.get_config()
+        restored = aether.preprocessing.deserialize({"class_name": "ToTensor", "config": cfg})
+
+        # After roundtrip, it should still be unpinned
+        self.assertFalse(restored._device_pinned)
+        self.assertEqual(restored.target_device, "numpy")
+
+        # Verify _compile_for_device with a different device emits no warning
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            restored._compile_for_device("cupy")
+
+        self.assertEqual(caught, [])
+        self.assertEqual(restored.target_device, "cupy")
+
+    def test_roundtrip_pinned_target_device(self):
+        """Pinned ToTensor: roundtrip via deserialize preserves pin state."""
+        transform = ToTensor(target_device="numpy")
+
+        cfg = transform.get_config()
+        restored = aether.preprocessing.deserialize({"class_name": "ToTensor", "config": cfg})
+
+        # After roundtrip, it should still be pinned
+        self.assertTrue(restored._device_pinned)
+        self.assertEqual(restored.target_device, "numpy")
+
+        # Verify _compile_for_device with a different device emits a warning
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            restored._compile_for_device("cupy")
+
+        self.assertEqual(len(caught), 1)
+        self.assertTrue(issubclass(caught[0].category, UserWarning))
+        self.assertIn("overrides it", str(caught[0].message))
+
+    def test_roundtrip_legacy_config_without_device_pinned_key(self):
+        """Legacy config without device_pinned key but with target_device: comes back pinned."""
+        # Simulate old config (before device_pinned key was added)
+        legacy_cfg = {
+            "dtype": None,
+            "preserve_integers": True,
+            "target_device": "numpy",
+        }
+
+        restored = aether.preprocessing.deserialize({"class_name": "ToTensor", "config": legacy_cfg})
+
+        # Should come back pinned (since target_device is not None and key is missing)
+        self.assertTrue(restored._device_pinned)
+        self.assertEqual(restored.target_device, "numpy")
+
+        # Verify _compile_for_device with a different device emits a warning (pinned behavior)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            restored._compile_for_device("cupy")
+
+        self.assertEqual(len(caught), 1)
+        self.assertTrue(issubclass(caught[0].category, UserWarning))
+
+    def test_compile_for_device_clears_pin_after_warning(self):
+        """Regression test: after pinned device is overridden, subsequent overrides emit no warning."""
+        t = ToTensor(target_device='cupy')
+        self.assertTrue(t._device_pinned)
+
+        # First override: should warn and clear the pin
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            t._compile_for_device('numpy')
+
+        self.assertEqual(len(caught), 1)
+        self.assertTrue(issubclass(caught[0].category, UserWarning))
+        self.assertFalse(t._device_pinned)
+        self.assertEqual(t.target_device, 'numpy')
+
+        # Second override: no warning (pin is already cleared)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            t._compile_for_device('cupy')
+
+        self.assertEqual(len(caught), 0)
+        self.assertEqual(t.target_device, 'cupy')
+
+        # Third override: still no warning
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            t._compile_for_device('numpy')
+
+        self.assertEqual(len(caught), 0)
+        self.assertEqual(t.target_device, 'numpy')
+
+        # get_config should reflect unpinned state
+        self.assertFalse(t.get_config()["device_pinned"])
 
 
 base_case.register_test_suites(globals(), TestToTensorTransform)

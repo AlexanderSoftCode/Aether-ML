@@ -1,4 +1,5 @@
 import warnings
+from unittest import mock
 
 import numpy as np
 
@@ -800,6 +801,52 @@ class TestConvLayer(base_case.AetherBaseLayerTestCase):
         out = self.layer.forward(self.test_images, training=True)
         self.assertEqual(out.shape, (self.CONV_SHAPE[0], 28, 28, self.OUT_CHANNELS))
         self.assertTrue(bool(self.xp.all(self.xp.isfinite(out))))
+
+    def test_backward_fallback_on_forward_compile_failure(self):
+        """Regression: when forward GPU kernel fails, backward must also fall back.
+
+        When conv_kernel.plan_forward_launch returns None (JIT failure), _forward_gpu
+        rebinds self.forward to the fallback. This test ensures self.backward is also
+        rebound to the fallback, so backward doesn't raise on the first training step.
+        """
+        if self.backend_name != 'cupy':
+            self.skipTest("CuPy backend required")
+        from aether.custom_kernels import conv_kernel
+        if not conv_kernel.get_is_conv_gpu_available():
+            self.skipTest("Matrix-core GPU kernels not available")
+
+        layer = self.make_built_layer(
+            Conv2d,
+            input_shape=(8, 8, self.IN_CHANNELS),
+            seed=self.SEED,
+            in_channels=self.IN_CHANNELS,
+            out_channels=2,
+            filter_size=self.FILTER_SIZE,
+            stride=self.STRIDE,
+            padding=self.PADDING,
+        )
+        layer._compile_for_device('cupy')
+
+        inputs = self.xp.random.randn(2, 8, 8, self.IN_CHANNELS).astype(self.xp.float32)
+        meta = layer._get_shape_meta((8, 8, self.IN_CHANNELS))
+        dvalues = self.xp.random.randn(
+            2, meta.H_out, meta.W_out, 2
+        ).astype(self.xp.float32)
+
+        with mock.patch.object(conv_kernel, 'plan_forward_launch', return_value=None), \
+             mock.patch.object(conv_kernel, 'plan_dweight_launch', return_value=None), \
+             mock.patch.object(conv_kernel, 'plan_dinput_launch', return_value=None):
+            # Forward should fall back without raising
+            output = layer.forward(inputs, training=True)
+            self.assertEqual(output.shape, (2, 8, 8, 2))
+
+            # Backward should use the fallback binding, not raise
+            dinputs = layer.backward(dvalues)
+
+        # Assert backward is now bound to the fallback
+        self.assertIs(layer.backward.__func__, Conv2d._backward_fallback)
+        # Assert dinputs has the input shape
+        self.assertEqual(dinputs.shape, inputs.shape)
 
 
 base_case.register_test_suites(globals(), TestConvLayer)
