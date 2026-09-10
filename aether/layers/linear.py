@@ -37,7 +37,13 @@ class Dense(Layer):
         # Ephemeral forward cache for backward reuse
         # Is also not used during inference
         self._inputs_compute = None
-        self._weights_compute = None 
+        self._weights_compute = None
+
+        # Shadow cast of weights/biases at compute precision, reused across
+        # forward calls until the weights, biases, or precision policy change.
+        self._weights_compute_cache = None
+        self._biases_compute_cache = None
+        self._compute_cache_valid = False
 
     def build(self, input_shape: tuple[int, ...], seed: int | None = None) -> tuple[int, ...]:
         """
@@ -69,23 +75,43 @@ class Dense(Layer):
 
         self.weights = (raw_weights * std).astype(xp.float32, copy=False)
         self.biases = xp.zeros((1, self.n_neurons), dtype=xp.float32)
+        self._compute_cache_valid = False
 
         self.output_shape = (self.n_neurons,)
         return self.output_shape
-        
+
     def _apply_precision(self, policy):
         """
         Called on Model.set_precision(), stores current policy and invalidates shadow
         cache. All astype checks happen on forward.
         """
         self.precision_policy = policy or config.DTypePolicy()
+        self._compute_cache_valid = False
+
+    def invalidate_shadow_caches(self):
+        """
+        Called by an optimizer after it writes into self.weights/self.biases'
+        underlying buffers in place (e.g. a fused GPU kernel taking the array
+        as an output pointer) -- that kind of update never goes through a
+        property setter, so _compute_cache_valid would otherwise stay True
+        and forward() would keep matmul-ing against a stale compute-precision
+        snapshot. Forces a rebuild on the next forward() that needs it.
+        """
+        self._compute_cache_valid = False
 
     def forward(self, inputs, training):
         xp = config.get_array_module(inputs)
 
-        inputs_c, weights_c, biases_c = self.precision_policy.cast_to_compute(
-            inputs, self.weights, self.biases
-        )
+        inputs_c = self.precision_policy.cast_to_compute(inputs)
+
+        if not self._compute_cache_valid:
+            self._weights_compute_cache, self._biases_compute_cache = self.precision_policy.cast_to_compute(
+                self.weights, self.biases
+            )
+            self._compute_cache_valid = True
+
+        weights_c = self._weights_compute_cache
+        biases_c = self._biases_compute_cache
 
         if training:
             self.inputs = inputs
@@ -143,6 +169,7 @@ class Dense(Layer):
             self.weights = weights
         if biases is not None:
             self.biases = biases
+        self._compute_cache_valid = False
 
 class Flatten(Layer):
     """Flattens all trailing input dimensions into a 2D tensor
