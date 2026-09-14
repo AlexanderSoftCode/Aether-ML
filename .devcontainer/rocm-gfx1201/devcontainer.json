@@ -1,6 +1,6 @@
 {
     "name": "Aether-ML (Python 3.14 + ROCm 7.14)",
-    
+
     "build": {
         "dockerfile": "aether-rocm-gfx1201.Dockerfile",
         "context": "../.."
@@ -10,7 +10,7 @@
         "--device=/dev/kfd",
         "--device=/dev/dri",
         "--ipc=host",
-        "--security-opt", 
+        "--security-opt",
         "seccomp=unconfined",
         "--shm-size=16G"
     ],
@@ -20,7 +20,7 @@
     "updateRemoteUserUID": false,
     "remoteUser": "ubuntu",
 
-    "postStartCommand": "sudo /usr/local/bin/fix-gpu-groups.sh",
+    "postStartCommand": ["sudo", "/usr/local/bin/fix-gpu-groups.sh"],
     "waitFor": "postStartCommand",
 
     "customizations": {
@@ -31,14 +31,13 @@
                 "ms-azuretools.vscode-docker"
             ],
             "settings": {
-                "python.defaultInterpreterPath": "/opt/venv/bin/python",
-                "python.formatting.provider": "black"
+                "python.defaultInterpreterPath": "/opt/venv/bin/python"
             }
         }
     },
 
-    "postCreateCommand": "pip install --no-build-isolation -e . --config-settings editable_mode=compat",
-    
+    "postCreateCommand": ["pip", "install", "--no-build-isolation", "-e", ".", "--config-settings", "editable_mode=compat"],
+
     "portsAttributes": {
         "8888": {
             "label": "Jupyter Lab Server",

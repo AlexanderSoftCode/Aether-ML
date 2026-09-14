@@ -14,7 +14,7 @@ set -euo pipefail
 #
 # Called by devcontainer.json's postStartCommand on every container start.
 # VS Code's Dev Containers CLI overrides the image's ENTRYPOINT/CMD with its
-# own keep-alive wrapper on every container it manages 
+# own keep-alive wrapper on every container it manages
 # ------------------------------------------------------------------------------
 
 TARGET_USER="${AETHER_CONTAINER_USER:-ubuntu}"
@@ -75,6 +75,17 @@ if [ -d /dev/dri ]; then
     done
 else
     echo "[fix-gpu-groups] Warning: /dev/dri not found - skipping render node group setup" >&2
+fi
+
+# Hard gate: if the GPU *was* passed through, the user must have ended up in the
+# group owning /dev/kfd. Build-time group setup no longer papers over a miss here.
+if [ -e /dev/kfd ]; then
+    kfd_gid="$(stat -c '%g' /dev/kfd)"
+    if ! id -G "${TARGET_USER}" | tr ' ' '\n' | grep -qx "${kfd_gid}"; then
+        echo "[fix-gpu-groups] FATAL: ${TARGET_USER} is not in the group owning /dev/kfd (gid=${kfd_gid})." >&2
+        echo "[fix-gpu-groups] Groups: $(id -nG "${TARGET_USER}")" >&2
+        exit 1
+    fi
 fi
 
 echo "[fix-gpu-groups] Final group membership for ${TARGET_USER}: $(id -nG "${TARGET_USER}")"

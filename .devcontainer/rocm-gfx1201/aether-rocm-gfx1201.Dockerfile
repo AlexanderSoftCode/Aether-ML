@@ -19,8 +19,6 @@ ENV ROCM_HOME=/opt/rocm \
 
 ENV CUPY_CACHE_DIR=/app/.devcontainer/.cupy_cache
 
-WORKDIR /workspace
-
 # ------------------------------------------------------------------------------
 # Step 1: Install Base OS Packages & Setup ROCm 7.14 Apt Repository
 # ------------------------------------------------------------------------------
@@ -63,28 +61,34 @@ ENV PATH="$VIRTUAL_ENV/bin:${PATH}"
 
 # 3a: Base build dependencies and utilities and normal prereqs
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel cython
-RUN pip install --no-cache-dir numpy safetensors jupyterlab
+RUN pip install --no-cache-dir numpy==2.5.3 safetensors==0.8.0 jupyterlab
 
 # 3b: Compile CuPy from source targeting ROCm HIP gfx1201
 ENV CUPY_INSTALL_USE_HIP=1
-RUN pip install --no-cache-dir --no-binary cupy cupy
+RUN pip install --no-cache-dir --no-binary cupy cupy==14.2.0
 
-# 3d: Validation check
-RUN python -c "import cupy, safetensors, numpy; print(f'Build check passed: CuPy {cupy.__version__}, SafeTensors {safetensors.__version__}, NumPy {numpy.__version__}')"
+# 3c: Validation check
+# NOTE: keep `from` off the start of a continuation line - the devcontainer CLI
+# parses Dockerfiles line-by-line and reads a leading `from` as a FROM instruction.
+RUN python -c "import cupy, safetensors, numpy; from cupy_backends.cuda.api import runtime; \
+assert runtime.is_hip, 'cupy was NOT built against ROCm/HIP (CUPY_INSTALL_USE_HIP ignored?)'; \
+print(f'Build check passed: CuPy {cupy.__version__} (HIP), SafeTensors {safetensors.__version__}, NumPy {numpy.__version__}')"
 
 # ------------------------------------------------------------------------------
 # Step 4: User Setup & Restricted Sudo
 # ------------------------------------------------------------------------------
 RUN mkdir -p /app \
-    && getent group video || groupadd video \
-    && getent group render || groupadd render \
-    && usermod -aG video,render ubuntu \
     && echo "ubuntu ALL=(root) NOPASSWD: /usr/local/bin/fix-gpu-groups.sh" > /etc/sudoers.d/ubuntu \
     && chmod 0440 /etc/sudoers.d/ubuntu \
     && chown -R ubuntu:ubuntu /app /opt/venv
 
 COPY --chmod=0755 .devcontainer/rocm-gfx1201/fix-gpu-groups.sh /usr/local/bin/fix-gpu-groups.sh
 COPY --chmod=0755 .devcontainer/rocm-gfx1201/entrypoint.sh /usr/local/bin/entrypoint.sh
+
+RUN for f in /usr/local/bin/fix-gpu-groups.sh /usr/local/bin/entrypoint.sh; do \
+        [ -x "$f" ] || { echo "ERROR: $f missing or not executable (check /.dockerignore)" >&2; exit 1; }; \
+    done; \
+    command -v gosu > /dev/null || { echo "ERROR: gosu not on PATH; entrypoint.sh privilege drop would fail" >&2; exit 1; }
 
 WORKDIR /app
 
