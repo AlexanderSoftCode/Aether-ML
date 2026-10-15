@@ -620,51 +620,53 @@ class Model():
         progress = make_progress(verbose, train_steps, epochs, has_reg)
         log_every = print_every if verbose else 0
 
-        for epoch in range(1, epochs + 1):
-            loss.new_pass()
-            accuracy.new_pass()
-            progress.start_epoch(epoch)
+        try:
+            for epoch in range(1, epochs + 1):
+                loss.new_pass()
+                accuracy.new_pass()
+                progress.start_epoch(epoch)
 
-            epoch_indices = xp.asarray(shuffle_rng.permutation(num_samples)) if shuffle else None
+                epoch_indices = xp.asarray(shuffle_rng.permutation(num_samples)) if shuffle else None
 
-            for step, (start_idx, end_idx) in enumerate(batch_slices):
-                batch_X, batch_y = get_batch(epoch_indices, start_idx, end_idx)
+                for step, (start_idx, end_idx) in enumerate(batch_slices):
+                    batch_X, batch_y = get_batch(epoch_indices, start_idx, end_idx)
 
-                data_loss, reg_loss, acc_val = run_step(
-                    prepare_input(batch_X), prepare_target(batch_y)
-                )
-
-                # Bar-only tick: pure host-side math, zero GPU sync.
-                progress.tick(step + 1)
-
-                # Telemetry: GPU-to-Host sync barrier strictly confined to log steps.
-                if log_every and (step % log_every == 0 or step == train_steps - 1):
-                    s_data_loss = float(data_loss)
-                    s_reg_loss = float(reg_loss)
-                    s_acc = float(acc_val)
-                    lr = get_lr()
-
-                    progress.update_metrics(
-                        step + 1,
-                        s_data_loss + s_reg_loss,
-                        s_acc,
-                        float(lr) if lr is not None else 0.0,
-                        reg_loss=s_reg_loss if has_reg else None,
+                    data_loss, reg_loss, acc_val = run_step(
+                        prepare_input(batch_X), prepare_target(batch_y)
                     )
 
-            accum = loss.calculate_accumulated(include_regularization=has_reg)
-            epoch_loss = float(accum[0] + accum[1]) if isinstance(accum, tuple) else float(accum)
-            epoch_acc = float(accuracy.calculate_accumulated())
+                    # Bar-only tick: pure host-side math, zero GPU sync.
+                    progress.tick(step + 1)
 
-            lr = get_lr()
-            progress.commit_epoch(epoch, epoch_loss, epoch_acc, float(lr) if lr is not None else 0.0)
+                    # Telemetry: GPU-to-Host sync barrier strictly confined to log steps.
+                    if log_every and (step % log_every == 0 or step == train_steps - 1):
+                        s_data_loss = float(data_loss)
+                        s_reg_loss = float(reg_loss)
+                        s_acc = float(acc_val)
+                        lr = get_lr()
 
-            if validation_data is not None:
-                X_val, y_val = validation_data
-                val_loss, val_acc = self.evaluate(X_val, y_val, batch_size=batch_size, verbose=0)
-                progress.commit_validation(val_loss, val_acc)
+                        progress.update_metrics(
+                            step + 1,
+                            s_data_loss + s_reg_loss,
+                            s_acc,
+                            float(lr) if lr is not None else 0.0,
+                            reg_loss=s_reg_loss if has_reg else None,
+                        )
 
-        progress.close()
+                accum = loss.calculate_accumulated(include_regularization=has_reg)
+                epoch_loss = float(accum[0] + accum[1]) if isinstance(accum, tuple) else float(accum)
+                epoch_acc = float(accuracy.calculate_accumulated())
+
+                lr = get_lr()
+                progress.commit_epoch(epoch, epoch_loss, epoch_acc, float(lr) if lr is not None else 0.0)
+
+                if validation_data is not None:
+                    X_val, y_val = validation_data
+                    val_loss, val_acc = self.evaluate(X_val, y_val, batch_size=batch_size, verbose=0)
+                    progress.commit_validation(val_loss, val_acc)
+
+        finally:
+            progress.close()
 
     def evaluate(self, X, y, *, batch_size=None, verbose=1):
         """

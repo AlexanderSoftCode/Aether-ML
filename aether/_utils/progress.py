@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import sys
 import time
 from typing import Callable, Literal
@@ -39,7 +40,7 @@ _GOODNESS = {
     "acc": 1,
 }
 
-# Precompute 31-step lookup tables at import time to eliminate per-tick string allocations
+# Every possible bar fill (0-30 cells), built once at import.
 _BAR_LOOKUP_COLOR = tuple(
     f"{Fore.YELLOW}{'█' * i}{Style.DIM}{'░' * (30 - i)}{Style.RESET_ALL}"
     for i in range(30)
@@ -53,6 +54,32 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 def _visible_len(text: str) -> int:
     """Printed column count of ``text``, ignoring embedded ANSI escapes."""
     return len(_ANSI_RE.sub("", text))
+
+
+def _clip(text: str) -> str:
+    """
+    Truncates ``text`` to one terminal row. tty redraws move the cursor up a
+    single row, so a live line that wraps would strand its overflow on screen.
+    ANSI escapes are kept intact and cost no columns.
+    """
+    width = shutil.get_terminal_size().columns - 1
+    if _visible_len(text) <= width:
+        return text
+
+    out, cols, pos = [], 0, 0
+    for match in _ANSI_RE.finditer(text):
+        chunk = text[pos:match.start()][: width - cols]
+        out.append(chunk)
+        out.append(match.group())
+        cols += len(chunk)
+        pos = match.end()
+    out.append(text[pos:][: width - cols])
+    return "".join(out) + Style.RESET_ALL
+
+
+def _to_pct(acc: float) -> float:
+    """Normalizes accuracy to percent; values above 1 are already percentages."""
+    return acc * 100.0 if 0.0 <= acc <= 1.0 else acc
 
 
 def _detect_render_mode(force_mode: str | None = None) -> RenderMode:
@@ -122,7 +149,7 @@ class TrainingProgress:
     epochs : int
         Total number of training epochs.
     has_reg : bool, default=False
-        Whether the model utilizes regularization loss. Derived once AOT.
+        Whether the model utilizes regularization loss.
     render_for : str, optional
         Force a specific render mode ('tty', 'jupyter', or 'plain').
     """
@@ -141,35 +168,33 @@ class TrainingProgress:
         self.use_color: bool = self.render_mode in ("tty", "jupyter")
         self._is_live: bool = self.render_mode != "plain"
 
-        # Static math factors to avoid runtime division in tick
+        # Scale factors mapping a step onto bar cells and percent.
         self._step_factor: float = 30.0 / self.total_steps
         self._percent_factor: float = 100.0 / self.total_steps
         self._step_width: int = len(str(self.total_steps))
         self._bar_lookup = _BAR_LOOKUP_COLOR if self.use_color else _BAR_LOOKUP_PLAIN
 
-        # SGR fragments resolved once; never re-derived per redraw.
+        # Empty when color is off, so format strings need no branching.
         self._dim: str = Style.DIM if self.use_color else ""
         self._bright: str = Style.BRIGHT if self.use_color else ""
         self._reset: str = Style.RESET_ALL if self.use_color else ""
 
-        # Bound stream primitives -- avoids repeated attribute lookup on the
-        # hot redraw path.
+        # All output goes through these, so tests can swap in a sink.
         self._write: Callable[[str], int] = sys.stdout.write
         self._flush: Callable[[], None] = sys.stdout.flush
 
-        # AOT pointer-swap dispatch: render mode and reg-presence are run-level
-        # constants, so bind the concrete implementation once.
+        # Render mode and reg-presence are fixed for the run, so pick each
+        # implementation once.
         self._render: Callable[[], None] = {
             "tty": self._render_tty,
             "jupyter": self._render_jupyter,
         }.get(self.render_mode, self._render_noop)
 
         self._format_telemetry: Callable[..., str] = (
-            self._format_telemetry_reg if has_reg else self._format_telemetry_plain
+            self._format_telemetry_reg if has_reg else self._format_telemetry_noreg
         )
 
         # Run-level persistent state
-        self._best_val_acc: float = float("-inf")
         self._prev_val: dict[str, float | None] = {"loss": None, "acc": None}
 
         # Run summary state. The clock starts at construction -- `make_progress`
@@ -242,7 +267,7 @@ class TrainingProgress:
         Called exclusively inside `print_every` gates.
         Computes metric deltas, updates telemetry, and executes a full redraw.
         """
-        acc_pct = acc * 100.0 if 0.0 <= acc <= 1.0 else acc
+        acc_pct = _to_pct(acc)
 
         loss_delta = _delta_str(
             "loss", loss, self._prev_train.get("loss"), is_pct=False, use_color=self.use_color
@@ -282,7 +307,7 @@ class TrainingProgress:
         landing beneath the combined live line under ``jupyter``.
         """
         self._final_train_loss = epoch_loss
-        epoch_acc_pct = epoch_acc * 100.0
+        epoch_acc_pct = _to_pct(epoch_acc)
 
         dim, bright, reset = self._dim, self._bright, self._reset
         summary = (
@@ -292,30 +317,13 @@ class TrainingProgress:
             f"{dim}lr:{reset} {lr:.6f}"
         )
 
-        if self._lines_on_screen == 0:
-            self._write(f"{summary}\n")
-            self._flush()
-            self._reset_live_state()
-            return
-
-        final_bar = self._final_bar_line()
-
-        if self.render_mode == "tty":
-            if self._lines_on_screen == 2:
-                self._write(f"\033[1A\r\033[2K{final_bar}\n\033[2K{summary}\n")
-            else:
-                self._write(f"\r\033[2K{final_bar}\n{summary}\n")
-        else:
-            self._write(f"\r{self._pad_jupyter(self._combine(final_bar))}\n{summary}\n")
-
-        self._flush()
-        self._reset_live_state()
+        self._freeze_live_block(
+            self._format_bar(self.total_steps, time.perf_counter()), summary
+        )
 
     def commit_validation(self, val_loss: float, val_acc: float) -> None:
         """Computes rolling epoch-over-epoch validation deltas and writes permanent summary."""
-        self._freeze_live_block()
-
-        val_acc_pct = val_acc * 100.0 if 0.0 <= val_acc <= 1.0 else val_acc
+        val_acc_pct = _to_pct(val_acc)
 
         loss_delta = _delta_str(
             "loss", val_loss, self._prev_val.get("loss"), is_pct=False, use_color=self.use_color
@@ -324,11 +332,7 @@ class TrainingProgress:
             "acc", val_acc_pct, self._prev_val.get("acc"), is_pct=True, use_color=self.use_color
         )
 
-        loss_d_str = f" {loss_delta}" if loss_delta else ""
-        acc_d_str = f" {acc_delta}" if acc_delta else ""
-
-        if val_acc > self._best_val_acc:
-            self._best_val_acc = val_acc
+        if self._best_val_acc_pct is None or val_acc_pct > self._best_val_acc_pct:
             self._best_val_acc_pct = val_acc_pct
             badge = (
                 f"   {Fore.YELLOW}★ new best acc{Style.RESET_ALL}"
@@ -344,15 +348,17 @@ class TrainingProgress:
         dim, bright, reset = self._dim, self._bright, self._reset
         self._write(
             f"{bright}[Validation]{reset} "
-            f"{dim}loss:{reset} {val_loss:.4f}{loss_d_str}   "
-            f"{dim}acc:{reset} {val_acc_pct:.2f}%{acc_d_str}{badge}\n"
+            f"{dim}loss:{reset} {val_loss:.4f} {loss_delta}   "
+            f"{dim}acc:{reset} {val_acc_pct:.2f}% {acc_delta}{badge}\n"
         )
         self._flush()
 
     def close(self) -> None:
         """Freezes any dangling live block, emits the run summary, and resets
         terminal color state."""
-        self._freeze_live_block()
+        # Only reached with a live block on screen when training aborted
+        # mid-epoch, so freeze the bar where it stopped rather than at 100%.
+        self._freeze_live_block(self._last_bar_line)
 
         if not self._closed:
             self._closed = True
@@ -411,11 +417,7 @@ class TrainingProgress:
             f"{ips:.1f} it/s  {_fmt_duration(elapsed)}"
         )
 
-    def _final_bar_line(self) -> str:
-        """Completed-state bar: the live frame evaluated at `step == total_steps`."""
-        return self._format_bar(self.total_steps, time.perf_counter())
-
-    # ---- Telemetry formatting (AOT-selected variants) ----------------------
+    # ---- Telemetry formatting (variant chosen in __init__) ----------------
 
     def _format_telemetry_reg(
         self,
@@ -435,7 +437,7 @@ class TrainingProgress:
             f"{dim}lr{reset} {lr:.2e}"
         )
 
-    def _format_telemetry_plain(
+    def _format_telemetry_noreg(
         self,
         loss: float,
         acc_pct: float,
@@ -455,25 +457,25 @@ class TrainingProgress:
 
     def _render_tty(self) -> None:
         """Two-line in-place redraw. Cursor invariant: rests at end of last live line."""
+        bar = _clip(self._last_bar_line)
         if self._last_telemetry_line:
+            telemetry = _clip(self._last_telemetry_line)
             if self._lines_on_screen == 2:
-                self._write(
-                    f"\033[1A\r\033[2K{self._last_bar_line}\n\033[2K{self._last_telemetry_line}"
-                )
+                self._write(f"\033[1A\r\033[2K{bar}\n\033[2K{telemetry}")
             else:
                 if self._lines_on_screen == 1:
-                    self._write(f"\r\033[2K{self._last_bar_line}\n{self._last_telemetry_line}")
+                    self._write(f"\r\033[2K{bar}\n{telemetry}")
                 else:
-                    self._write(f"{self._last_bar_line}\n{self._last_telemetry_line}")
+                    self._write(f"{bar}\n{telemetry}")
                 self._lines_on_screen = 2
         else:
             if self._lines_on_screen == 1:
-                self._write(f"\r\033[2K{self._last_bar_line}")
+                self._write(f"\r\033[2K{bar}")
             elif self._lines_on_screen == 2:
-                self._write(f"\033[1A\r\033[2K{self._last_bar_line}\n\033[2K")
+                self._write(f"\033[1A\r\033[2K{bar}\n\033[2K")
                 self._lines_on_screen = 1
             else:
-                self._write(self._last_bar_line)
+                self._write(bar)
                 self._lines_on_screen = 1
         self._flush()
 
@@ -512,26 +514,22 @@ class TrainingProgress:
 
     # ---- Freeze helpers -----------------------------------
 
-    def _freeze_live_block(self) -> None:
+    def _freeze_live_block(self, bar: str, tail: str = "") -> None:
         """
-        Commits the live lines to scrollback without destroying them, then
-        drops the cursor to a fresh line. No-op once already frozen.
+        Commits the live block to scrollback with ``bar`` as its final frame,
+        writes ``tail`` beneath it, and drops the cursor to a fresh line. Under
+        ``tty`` an empty ``tail`` keeps the live telemetry line.
         """
         if self._lines_on_screen == 0:
-            return
-
-        final_bar = self._final_bar_line()
-
-        if self.render_mode == "tty":
-            if self._lines_on_screen == 2:
-                self._write(
-                    f"\033[1A\r\033[2K{final_bar}\n\033[2K{self._last_telemetry_line}\n"
-                )
-            else:
-                self._write(f"\r\033[2K{final_bar}\n")
+            lines = [tail]
+        elif self.render_mode == "tty":
+            up = "\033[1A" if self._lines_on_screen == 2 else ""
+            tail = tail or self._last_telemetry_line
+            lines = [f"{up}\r\033[2K{_clip(bar)}", f"\033[2K{tail}" if tail else ""]
         else:  # jupyter -- single combined live line, frozen as drawn
-            self._write(f"\r{self._pad_jupyter(self._combine(final_bar))}\n")
+            lines = [f"\r{self._pad_jupyter(self._combine(bar))}", tail]
 
+        self._write("".join(f"{line}\n" for line in lines if line))
         self._flush()
         self._reset_live_state()
 

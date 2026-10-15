@@ -1,7 +1,15 @@
 import io
 import re
 import unittest
+from unittest import mock
 
+import numpy as np
+
+from aether.model import Model
+from aether.layers import Dense
+from aether.losses import CategoricalCrossEntropy
+from aether.optimizers import Adam
+from aether.metrics import CategoricalAccuracy
 from aether._utils.progress import TrainingProgress, make_progress, _visible_len
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -106,6 +114,24 @@ class TestOtherRenderModes(unittest.TestCase):
             visible = _ANSI.sub("", raw_line.split("\r")[-1])
             trailing = len(visible) - len(visible.rstrip())
             self.assertLessEqual(trailing, _MAX_TRAILING)
+
+    def test_tty_live_lines_never_wrap_a_narrow_terminal(self):
+        # The redraw moves the cursor up exactly one row per live line, so a
+        # wrapped line would strand its overflow on screen.
+        size = mock.Mock(columns=40)
+        with mock.patch("shutil.get_terminal_size", return_value=size):
+            stream = _drive(TrainingProgress(40, 2, has_reg=True, render_for="tty"))
+
+        # Everything except the committed summary lines is a live frame.
+        committed = ("Total]", "[Validation]", "[Summary]")
+        live = [
+            seg
+            for seg in re.split(r"\r|\n|\033\[1A", stream)
+            if seg and not any(tag in seg for tag in committed)
+        ]
+        self.assertTrue(live)
+        for seg in live:
+            self.assertLessEqual(_visible_len(seg), 39, _ANSI.sub("", seg))
 
     def test_plain_emits_no_escapes_and_no_carriage_returns(self):
         stream = _drive(TrainingProgress(40, 2, has_reg=True, render_for="plain"))
@@ -218,6 +244,52 @@ class TestRunSummary(unittest.TestCase):
         progress.close()
 
         self.assertEqual(len(self._summaries(sink.getvalue())), 1)
+
+
+class TestTrainInterrupt(unittest.TestCase):
+    """An exception mid-epoch must still release the live block."""
+
+    def test_interrupt_leaves_cursor_on_fresh_line(self):
+        model = Model()
+        model.to("numpy")
+        model.add(Dense(n_inputs=4, n_neurons=3))
+        model.configure(
+            loss=CategoricalCrossEntropy(),
+            optimizer=Adam(lr=0.01),
+            accuracy=CategoricalAccuracy(),
+        )
+        model.finalize(input_shape=(4,))
+
+        X = np.random.randn(32, 4).astype("float32")
+        y = np.random.randint(0, 3, size=(32,)).astype("int32")
+
+        progress = TrainingProgress(4, 1, render_for="tty")
+        sink = io.StringIO()
+        progress._write = sink.write
+        progress._flush = lambda: None
+
+        forward = model.forward
+        calls = iter(range(3))
+
+        def interrupting_forward(*args, **kwargs):
+            if next(calls) == 2:
+                raise KeyboardInterrupt
+            return forward(*args, **kwargs)
+
+        model.forward = interrupting_forward
+
+        with (
+            mock.patch("aether.model.make_progress", return_value=progress),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            model.train(X, y, epochs=1, batch_size=8, print_every=1)
+
+        self.assertTrue(
+            _ANSI.sub("", sink.getvalue()).endswith("\n"),
+            "traceback would print on the live line",
+        )
+        # Frozen where it stopped, not reported as a completed epoch.
+        self.assertNotIn("100%", sink.getvalue())
 
 
 class TestVisibleLen(unittest.TestCase):
