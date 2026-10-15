@@ -4,6 +4,7 @@ import shutil
 import tempfile
 import warnings
 import zipfile
+from unittest import mock
 import numpy as np
 
 import aether.config as config
@@ -52,6 +53,68 @@ class TestModelSaveBase(base_case.AetherBaseTestCase):
 
         with self.assertRaises(RuntimeError):
             model.save(self.save_path)
+
+    def test_failed_save_keeps_existing_archive(self):
+        """A save that dies mid-write leaves the previous archive intact and no temp files."""
+        model = Model()
+        model.add(Dense(self.NUM_FEATURES, 4))
+        model.finalize((self.NUM_FEATURES,))
+        model.save(self.save_path)
+        with open(self.save_path, "rb") as f:
+            original = f.read()
+
+        with (
+            mock.patch("aether.model.os.fsync", side_effect=OSError("No space left on device")),
+            self.assertRaises(OSError),
+        ):
+            model.save(self.save_path)
+
+        with open(self.save_path, "rb") as f:
+            self.assertEqual(f.read(), original)
+        self.assertEqual(os.listdir(self.temp_dir), ["test_model.aether"])
+
+    def test_save_permissions_follow_umask(self):
+        """The atomic temp file must not leave archives at tempfile's private 0600."""
+        if os.name == "nt":
+            self.skipTest("POSIX permission bits")
+        model = Model()
+        model.add(Dense(self.NUM_FEATURES, 4))
+        model.finalize((self.NUM_FEATURES,))
+        for umask, expected in ((0o022, 0o644), (0o002, 0o664), (0o077, 0o600)):
+            previous = os.umask(umask)
+            try:
+                model.save(self.save_path)
+            finally:
+                os.umask(previous)
+            with self.subTest(umask=oct(umask)):
+                self.assertEqual(os.stat(self.save_path).st_mode & 0o777, expected)
+
+    def test_save_replaces_symlink_instead_of_following_it(self):
+        """Saving over a symlink swaps the link, leaving its target untouched."""
+        target = os.path.join(self.temp_dir, "elsewhere.txt")
+        with open(target, "wb") as f:
+            f.write(b"keep")
+        os.symlink(target, self.save_path)
+
+        model = Model()
+        model.add(Dense(self.NUM_FEATURES, 4))
+        model.finalize((self.NUM_FEATURES,))
+        model.save(self.save_path)
+
+        self.assertFalse(os.path.islink(self.save_path))
+        with open(target, "rb") as f:
+            self.assertEqual(f.read(), b"keep")
+        self.assertTrue(zipfile.is_zipfile(self.save_path))
+
+    def test_save_nonfinite_config_raises(self):
+        """NaN/Infinity cannot be written as strict JSON, so save() names the value."""
+        model = Model()
+        model.add(Dense(self.NUM_FEATURES, 4))
+        model.add(LeakyReLU(alpha=float("nan")))
+        model.finalize((self.NUM_FEATURES,))
+        with self.assertRaisesRegex(ValueError, r"layers\.1\.config\.alpha"):
+            model.save(self.save_path)
+        self.assertFalse(os.path.exists(self.save_path))
 
     # ---- Archive Container & Compression Tests ----
 

@@ -1,6 +1,11 @@
 import json
+import math
+import os
+import stat
+import tempfile
 import warnings
 import zipfile
+import zlib
 from functools import partial
 from pathlib import Path
 import numpy as np
@@ -39,6 +44,17 @@ _COMPONENT_NAMESPACES = {
     "loss": (loss_module, loss_module.Loss),
     "optimizer": (optimizer_module, optimizer_module.Optimizer),
     "accuracy": (metric_module, metric_module.Accuracy),
+}
+
+# Model.load() treats archives as untrusted input. These bound what a hostile file can
+# make it read, decompress, or allocate before it is rejected.
+_DEFAULT_MAX_MANIFEST_BYTES = 1 << 20  # 1 MiB
+_DEFAULT_MAX_WEIGHTS_BYTES = 4 << 30   # 4 GiB
+_ZIP_OVERHEAD_BYTES = 64 << 10         # headers + central directory of a two-member zip
+_MIN_DIM_BOUND = 4096                  # floor for the allocation bound, so tiny models still load
+_ARCHIVE_MEMBERS = {
+    "architecture.json": (zipfile.ZIP_DEFLATED, zipfile.ZIP_STORED),
+    "weights.safetensors": (zipfile.ZIP_STORED,),
 }
 
 def _serialize_component(obj):
@@ -93,6 +109,168 @@ def _resolve_component(entry, kind):
             f"[aether] Could not reconstruct {kind} '{class_name}' from saved config "
             f"{cfg}. The class signature may have changed since the model was saved."
         ) from exc
+
+
+def _too_large(path, what, size, kwarg, limit):
+    return ValueError(
+        f"[aether] Archive '{path.name}' {what} is {size} bytes, which exceeds "
+        f"{kwarg}={limit}; pass a larger value if you trust this file."
+    )
+
+
+def _bounded_read(zipf, info, cap):
+    # Read one byte past the cap so an oversized member is detected without
+    # inflating it, even when its declared file_size lies.
+    with zipf.open(info) as member:
+        return member.read(cap + 1)
+
+
+def _read_archive(path, max_manifest_bytes, max_weights_bytes):
+    """Returns the (manifest, weights) bytes of an .aether archive, reading and
+    decompressing at most the given number of bytes per member."""
+    limit = max_manifest_bytes + max_weights_bytes + _ZIP_OVERHEAD_BYTES
+    # O_NONBLOCK so a FIFO cannot hang the open; checks then run on the descriptor
+    # actually read, so the file cannot be swapped between check and read.
+    with open(os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)), "rb") as f:
+        st = os.fstat(f.fileno())
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError(f"[aether] Archive '{path.name}' is not a regular file.")
+        # Checked before parsing: zipfile reads the whole central directory up front.
+        if st.st_size > limit:
+            raise _too_large(path, "on disk", st.st_size, "max_manifest_bytes + max_weights_bytes", limit)
+        return _read_members(f, path, {
+            "architecture.json": ("max_manifest_bytes", max_manifest_bytes),
+            "weights.safetensors": ("max_weights_bytes", max_weights_bytes),
+        })
+
+
+def _read_members(f, path, caps):
+    contents = {}
+    try:
+        with zipfile.ZipFile(f) as zipf:
+            infos = zipf.infolist()
+            # Exactly one of each: zipfile resolves a duplicated name to its last
+            # entry while other tools show the first, so duplicates are ambiguous.
+            if sorted(info.filename for info in infos) != sorted(_ARCHIVE_MEMBERS):
+                raise ValueError(
+                    f"[aether] Archive '{path.name}' must contain exactly "
+                    f"{' and '.join(_ARCHIVE_MEMBERS)}, once each (found {len(infos)} members)."
+                )
+            for info in infos:
+                kwarg, cap = caps[info.filename]
+                if info.flag_bits & 0x1:
+                    raise ValueError(f"[aether] Archive '{path.name}' member '{info.filename}' is encrypted.")
+                if info.compress_type not in _ARCHIVE_MEMBERS[info.filename]:
+                    raise ValueError(
+                        f"[aether] Archive '{path.name}' member '{info.filename}' uses "
+                        f"unsupported compression method {info.compress_type}."
+                    )
+                if info.file_size > cap:
+                    raise _too_large(path, f"member '{info.filename}'", info.file_size, kwarg, cap)
+                data = _bounded_read(zipf, info, cap)
+                if len(data) > cap:
+                    raise _too_large(path, f"member '{info.filename}'", f"over {cap}", kwarg, cap)
+                contents[info.filename] = data
+    except (zipfile.BadZipFile, OSError, RuntimeError, EOFError, zlib.error) as exc:
+        raise ValueError(f"[aether] Archive '{path.name}' is not a valid .aether archive: {exc}") from exc
+
+    return contents["architecture.json"], contents["weights.safetensors"]
+
+
+def _parse_manifest(raw, name):
+    """Decodes and structurally validates the architecture.json manifest."""
+    def reject_constant(token):
+        raise ValueError(f"non-standard constant {token}")
+
+    def unique_keys(pairs):
+        obj = dict(pairs)
+        if len(obj) != len(pairs):
+            raise ValueError("duplicate object keys")
+        return obj
+
+    try:
+        manifest = json.loads(
+            raw.decode("utf-8"), parse_constant=reject_constant, object_pairs_hook=unique_keys
+        )
+    except (ValueError, RecursionError) as exc:
+        raise ValueError(f"[aether] Archive '{name}' manifest is not valid JSON: {exc}") from exc
+
+    def check(ok, field, problem):
+        if not ok:
+            raise ValueError(f"[aether] Archive '{name}' manifest: {field} {problem}.")
+
+    def is_entry(entry):
+        return (
+            isinstance(entry, dict)
+            and isinstance(entry.get("class_name"), str)
+            and isinstance(entry.get("config"), (dict, type(None)))
+        )
+
+    check(isinstance(manifest, dict), "top level", "must be an object")
+    shape = manifest.get("input_shape")
+    check(
+        isinstance(shape, list) and shape and all(type(d) is int and d > 0 for d in shape),
+        "input_shape", "must be a non-empty list of positive ints",
+    )
+    layers = manifest.get("layers")
+    check(isinstance(layers, list) and layers, "layers", "must be a non-empty list")
+    for i, entry in enumerate(layers):
+        check(is_entry(entry), f"layers[{i}]", "must be a {class_name, config} object")
+        check(type(entry.get("index")) is int and entry["index"] == i, f"layers[{i}].index", f"must be {i}")
+    compile_cfg = manifest.get("compile")
+    check(isinstance(compile_cfg, (dict, type(None))), "compile", "must be an object or null")
+    entries = [*((f"compile.{k}", v) for k, v in (compile_cfg or {}).items()),
+               ("preprocessor", manifest.get("preprocessor"))]
+    for field, entry in entries:
+        check(entry is None or is_entry(entry), field, "must be null or a {class_name, config} object")
+    seed = manifest.get("seed")
+    check(seed is None or type(seed) is int, "seed", "must be an int or null")
+    check(isinstance(manifest.get("precision_policy"), (str, type(None))), "precision_policy", "must be a str or null")
+    return manifest
+
+
+def _max_config_int(value):
+    """Largest int anywhere in a manifest value, ignoring bools and RNG seeds."""
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, (list, tuple)):
+        return max(map(_max_config_int, value), default=0)
+    if isinstance(value, dict):
+        return max((_max_config_int(v) for k, v in value.items() if k != "seed"), default=0)
+    return 0
+
+
+def _current_umask():
+    """The process umask. os.umask() can only read it by setting it, which briefly
+    leaves other threads creating files with no mask, so Linux reads /proc instead."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("Umask:"):
+                    return int(line.split()[1], 8)
+    except OSError:
+        pass
+    mask = os.umask(0o077)
+    os.umask(mask)
+    return mask
+
+
+def _nonfinite_path(value, where="manifest"):
+    """Dotted path to the first NaN/Infinity in a manifest value, or None."""
+    if isinstance(value, float):
+        return None if math.isfinite(value) else where
+    if isinstance(value, dict):
+        items = value.items()
+    elif isinstance(value, (list, tuple)):
+        items = enumerate(value)
+    else:
+        return None
+    return next(
+        (found for key, item in items if (found := _nonfinite_path(item, f"{where}.{key}"))), None
+    )
+
 
 class Model():
     def __init__(self):
@@ -822,6 +1000,13 @@ class Model():
             RuntimeError: If model is not finalized.
             ImportError: If safetensors is not installed.
             FileNotFoundError: If the directory being saved to does not exist.
+            ValueError: If a component config holds NaN or Infinity, which JSON
+                cannot represent.
+
+        Note:
+            Writes go to a temp file that atomically replaces `filepath`, so a failed
+            save leaves the old archive intact. The new file gets umask permissions,
+            and a symlink at `filepath` is replaced rather than followed.
         """
         if not self.is_finalized:
             raise RuntimeError(
@@ -876,19 +1061,48 @@ class Model():
             for key, tensor in _flat_parameters(self.layers).items()
         }
 
+        # NaN/Infinity are not JSON, and load() rejects them.
+        bad_value = _nonfinite_path(arch_manifest)
+        if bad_value is not None:
+            raise ValueError(
+                f"[aether] Cannot save: '{bad_value}' is not a finite number, "
+                f"which JSON cannot represent."
+            )
+        arch_json_bytes = json.dumps(arch_manifest, indent=2, allow_nan=False).encode("utf-8")
         weights_bytes = safetensors.numpy.save(weight_dict)
-        arch_json_bytes = json.dumps(arch_manifest, indent=2).encode("utf-8")
 
-        with zipfile.ZipFile(path, "w") as zipf:
+        # Write to a sibling temp file and atomically swap it in, so a crash or a full
+        # disk mid-write never destroys an existing checkpoint at `path`. The temp file
+        # is removed on exit unless os.replace() already moved it into place.
+        with (
+            tempfile.NamedTemporaryFile(
+                dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete_on_close=False
+            ) as tmp,
+            zipfile.ZipFile(tmp, "w") as zipf,
+        ):
             zipf.writestr(
                 "architecture.json", arch_json_bytes, compress_type=zipfile.ZIP_DEFLATED
             )
             zipf.writestr(
                 "weights.safetensors", weights_bytes, compress_type=zipfile.ZIP_STORED
             )
+            zipf.close()  # writes the central directory
+            tmp.flush()
+            os.fsync(tmp.fileno())
+            tmp.close()
+            # tempfile creates 0600; give the archive the permissions a plain open() would.
+            os.chmod(tmp.name, 0o666 & ~_current_umask())
+            os.replace(tmp.name, path)
 
     @classmethod
-    def load(cls, filepath: str, device: str | None = None) -> "Model":
+    def load(
+        cls,
+        filepath: str,
+        device: str | None = None,
+        *,
+        max_manifest_bytes: int = _DEFAULT_MAX_MANIFEST_BYTES,
+        max_weights_bytes: int = _DEFAULT_MAX_WEIGHTS_BYTES,
+    ) -> "Model":
         """Loads a model architecture, training components, and parameters from an
         .aether zip archive.
 
@@ -896,6 +1110,9 @@ class Model():
             filepath (str): Path to the saved .aether model file.
             device (str, optional): Target hardware device ('numpy' or 'cupy').
                 Defaults to None (uses current active backend).
+            max_manifest_bytes (int): Largest manifest accepted. Defaults to 1 MiB.
+            max_weights_bytes (int): Largest weights accepted. Defaults to 4 GiB;
+                raise it for larger trusted models.
 
         Returns:
             Model: A configured, finalized, and initialized Model instance.
@@ -903,23 +1120,25 @@ class Model():
         Raises:
             ImportError: If safetensors is not installed.
             FileNotFoundError: If the archive does not exist.
-            ValueError: If the manifest was written by a newer schema major version,
-                references an unknown layer/component class, or its stored weights
-                are missing, unexpected, or of the wrong shape or dtype for the
-                rebuilt architecture.
+            ValueError: If the archive is malformed, exceeds a size limit, or its
+                weights don't match the architecture it describes.
+            TypeError: If a manifest entry names a non-component class or a config
+                its constructor rejects.
+
+        Security:
+            Only load archives you trust: they are not signed. Loading never runs
+            code, reads at most the size limits above, and a rejected archive leaves
+            the global backend untouched. Memory is only partly bounded: a crafted
+            manifest can still request a very large layer before its weights are
+            checked, which may get the process killed rather than raise.
 
         Note:
-            Loading calls `Model.to()` on the new model, which switches aether's
-            global execution backend. Passing `device` therefore retargets every
-            model in the process, not just the loaded one -- e.g. loading with
-            `device="numpy"` while another model trains on CuPy moves that model's
-            backend to NumPy too. Call `.to()` on the other model afterwards to
-            switch back.
+            `device` switches aether's global backend, so it also retargets every
+            other model in the process.
 
         Warns:
-            UserWarning: If the manifest carries a newer schema minor version.
-                Minor bumps are additive, so the archive still loads, but any key
-                this build does not recognize is ignored.
+            UserWarning: If the archive uses a newer schema minor version; it still
+                loads, but unrecognized keys are ignored.
 
         Example:
             >>> import aether as ae
@@ -943,12 +1162,14 @@ class Model():
         active_backend = "cupy" if getattr(config.xp, "__name__", "") == "cupy" else "numpy"
         target_device = device if device is not None else active_backend
 
-        with zipfile.ZipFile(path, "r") as zipf:
-            arch_bytes = zipf.read("architecture.json")
-            weights_bytes = zipf.read("weights.safetensors")
-
-        manifest = json.loads(arch_bytes.decode("utf-8"))
-        raw_weights = safetensors.numpy.load(weights_bytes)
+        arch_bytes, weights_bytes = _read_archive(path, max_manifest_bytes, max_weights_bytes)
+        manifest = _parse_manifest(arch_bytes, path.name)
+        try:
+            raw_weights = safetensors.numpy.load(weights_bytes)
+        except safetensors.SafetensorError as exc:
+            raise ValueError(f"[aether] Archive '{path.name}' weights are not valid safetensors: {exc}") from exc
+        # The parsed tensors are copies; drop the raw member before finalize() allocates.
+        del weights_bytes
 
         schema_version = str(manifest.get("schema_version", "1.0"))
         major_str, _, minor_str = schema_version.partition(".")
@@ -976,37 +1197,60 @@ class Model():
                 stacklevel=2,
             )
 
-        model = cls()
+        try:
+            # finalize() allocates every parameter (and optimizer moment) from the
+            # manifest before the weights can be checked. Every parameter dimension is
+            # at most the element count of the tensor it shapes, and the safetensors
+            # header cannot declare more elements than the bytes present, so a dimension
+            # beyond the largest stored tensor is a request no real model makes.
+            bound = max(_MIN_DIM_BOUND, max((a.size for a in raw_weights.values()), default=0))
+            largest = _max_config_int(
+                [manifest["input_shape"], [entry["config"] for entry in manifest["layers"]]]
+            )
+            if largest > bound:
+                raise ValueError(
+                    f"[aether] Archive '{path.name}' manifest requests a dimension of {largest}, "
+                    f"larger than its biggest stored tensor allows ({bound})."
+                )
 
-        if manifest.get("seed") is not None:
-            model.manual_seed(manifest["seed"])
+            model = cls()
 
-        # Reconstruct Layers. JSON has no tuples, so shape-like config values come
-        # back as lists and are restored to the tuples the constructors expect.
-        for layer_entry in manifest.get("layers", []):
-            cfg = {
-                k: tuple(v) if isinstance(v, list) else v
-                for k, v in (layer_entry.get("config") or {}).items()
+            if manifest["seed"] is not None:
+                model.manual_seed(manifest["seed"])
+
+            # Reconstruct Layers. JSON has no tuples, so shape-like config values come
+            # back as lists and are restored to the tuples the constructors expect.
+            for layer_entry in manifest["layers"]:
+                cfg = {
+                    k: tuple(v) if isinstance(v, list) else v
+                    for k, v in (layer_entry["config"] or {}).items()
+                }
+                model.add(_resolve_component({**layer_entry, "config": cfg}, "layer"))
+
+            # Reconstruct Training Components (Via table-driven helper)
+            compile_cfg = manifest.get("compile") or {}
+            components = {
+                kind: _resolve_component(compile_cfg.get(kind), kind)
+                for kind in ("loss", "optimizer", "accuracy")
             }
-            model.add(_resolve_component({**layer_entry, "config": cfg}, "layer"))
 
-        # Reconstruct Training Components (Via table-driven helper)
-        compile_cfg = manifest.get("compile") or {}
-        components = {
-            kind: _resolve_component(compile_cfg.get(kind), kind)
-            for kind in ("loss", "optimizer", "accuracy")
-        }
+            components["preprocessor"] = transforms_module.deserialize(
+                manifest.get("preprocessor")
+            )
 
-        components["preprocessor"] = transforms_module.deserialize(
-            manifest.get("preprocessor")
-        )
+            if any(component is not None for component in components.values()):
+                model.configure(**components)
 
-        if any(component is not None for component in components.values()):
-            model.configure(**components)
-        model.to(target_device)
-
-        input_shape = tuple(manifest["input_shape"])
-        model.finalize(input_shape=input_shape)
+            # Built on the current backend; the move to `target_device` waits until the
+            # weights are verified, so a rejected archive never switches the global backend.
+            model.finalize(input_shape=tuple(manifest["input_shape"]))
+        except RecursionError as exc:
+            raise ValueError(f"[aether] Archive '{path.name}' manifest nests too deeply.") from exc
+        except MemoryError as exc:
+            raise ValueError(
+                f"[aether] Archive '{path.name}' architecture does not fit in memory; "
+                f"its manifest may request far more than its weights account for."
+            ) from exc
 
         # Load & Map Weights. Strict: the archive must hold exactly the parameters the
         # rebuilt graph expects, so a truncated or mismatched file can never leave a
@@ -1034,6 +1278,8 @@ class Model():
                 f"{', '.join(mismatched)}."
             )
 
+        model.to(target_device)
+
         layer_param_map: dict[int, dict] = {}
         for flat_key, array in raw_weights.items():
             idx_str, param_name = flat_key.split(".", 1)
@@ -1045,7 +1291,7 @@ class Model():
         for idx, params in layer_param_map.items():
             model.layers[idx].set_parameters(**params)
 
-        if manifest.get("precision_policy") is not None:
+        if manifest["precision_policy"] is not None:
             model.set_precision(manifest["precision_policy"])
 
         return model
