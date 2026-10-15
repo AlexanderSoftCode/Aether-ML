@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import struct
 import tempfile
 import warnings
 import zipfile
@@ -51,12 +52,12 @@ class TestModelLoadBase(base_case.AetherBaseTestCase):
             Model.load(non_existent_path)
 
     def test_load_corrupted_archive_raises(self):
-        """Ensure loading a corrupted/truncated zip archive raises BadZipFile."""
+        """Ensure loading a corrupted/truncated zip archive raises ValueError."""
         corrupt_path = os.path.join(self.temp_dir, "corrupt_model.aether")
         with open(corrupt_path, "wb") as f:
             f.write(b"NOT_A_VALID_ZIP_PAYLOAD_DATA")
 
-        with self.assertRaises(zipfile.BadZipFile):
+        with self.assertRaisesRegex(ValueError, "not a valid .aether archive"):
             Model.load(corrupt_path)
 
     def test_load_unknown_layer_class_raises(self):
@@ -82,10 +83,8 @@ class TestModelLoadBase(base_case.AetherBaseTestCase):
             Model.load(corrupt_save_path)
         self.assertIn("HypotheticalAlienLayer", str(ctx.exception))
 
-    def _save_with_rewritten_weights(self, rewrite):
-        """Saves a small MLP, then rewrites its weight dict via `rewrite`."""
-        import safetensors.numpy
-
+    def _save_mlp_members(self):
+        """Saves a small MLP and returns its (manifest bytes, weights bytes)."""
         model = Model()
         model.add(Dense(self.NUM_FEATURES, 16))
         model.add(ReLU())
@@ -94,15 +93,48 @@ class TestModelLoadBase(base_case.AetherBaseTestCase):
         model.save(self.save_path)
 
         with zipfile.ZipFile(self.save_path, "r") as zipf:
-            manifest_bytes = zipf.read("architecture.json")
-            weights = safetensors.numpy.load(zipf.read("weights.safetensors"))
+            return zipf.read("architecture.json"), zipf.read("weights.safetensors")
 
+    def _write_archive(self, *members):
+        """Writes (name, data[, compress_type]) members verbatim to a fresh archive."""
+        path = os.path.join(self.temp_dir, "crafted.aether")
+        with warnings.catch_warnings(), zipfile.ZipFile(path, "w") as zipf:
+            warnings.simplefilter("ignore")  # duplicate-name warning
+            for name, data, *compress_type in members:
+                zipf.writestr(name, data, compress_type=compress_type[0] if compress_type else None)
+        return path
+
+    def _write_manifest_archive(self, mutate):
+        """Re-saves the MLP with its manifest dict passed through `mutate`."""
+        manifest_bytes, weights_bytes = self._save_mlp_members()
+        manifest = json.loads(manifest_bytes)
+        mutate(manifest)
+        return self._write_archive(
+            ("architecture.json", json.dumps(manifest).encode()), ("weights.safetensors", weights_bytes)
+        )
+
+    @staticmethod
+    def _patch_central_directory(path, member, offset, fmt, value):
+        """Overwrites one field of `member`'s central-directory record in place."""
+        with open(path, "r+b") as f:
+            blob = f.read()
+            pos = blob.index(b"PK\x01\x02")
+            while blob[pos + 46:pos + 46 + len(member)] != member.encode():
+                pos = blob.index(b"PK\x01\x02", pos + 4)
+            f.seek(pos + offset)
+            f.write(struct.pack(fmt, value))
+
+    def _save_with_rewritten_weights(self, rewrite):
+        """Saves a small MLP, then rewrites its weight dict via `rewrite`."""
+        import safetensors.numpy
+
+        manifest_bytes, weights_bytes = self._save_mlp_members()
+        weights = safetensors.numpy.load(weights_bytes)
         rewrite(weights)
-        bad_path = os.path.join(self.temp_dir, "bad_weights.aether")
-        with zipfile.ZipFile(bad_path, "w") as zipf:
-            zipf.writestr("architecture.json", manifest_bytes)
-            zipf.writestr("weights.safetensors", safetensors.numpy.save(weights))
-        return bad_path
+        return self._write_archive(
+            ("architecture.json", manifest_bytes),
+            ("weights.safetensors", safetensors.numpy.save(weights)),
+        )
 
     def test_load_missing_weights_raises(self):
         """Ensure an archive lacking a parameter fails instead of keeping random init."""
@@ -137,6 +169,134 @@ class TestModelLoadBase(base_case.AetherBaseTestCase):
         bad_path = self._save_with_rewritten_weights(downcast)
         with self.assertRaisesRegex(ValueError, "0.weights.*uint8"):
             Model.load(bad_path)
+
+    # ---- Untrusted Archive Hardening Tests ----
+
+    def test_load_rejects_zip_bomb_manifest_without_inflating(self):
+        """A highly compressible manifest is rejected on its declared size."""
+        _, weights_bytes = self._save_mlp_members()
+        bomb = self._write_archive(
+            ("architecture.json", b" " * (2 << 20), zipfile.ZIP_DEFLATED),
+            ("weights.safetensors", weights_bytes),
+        )
+        self.assertLess(os.path.getsize(bomb), 64 << 10)
+        with self.assertRaisesRegex(ValueError, "max_manifest_bytes"):
+            Model.load(bomb)
+
+    def test_load_rejects_member_with_lying_size_header(self):
+        """A bomb whose central directory understates its size is still read bounded."""
+        _, weights_bytes = self._save_mlp_members()
+        bomb = self._write_archive(
+            ("architecture.json", b" " * (2 << 20), zipfile.ZIP_DEFLATED),
+            ("weights.safetensors", weights_bytes),
+        )
+        self._patch_central_directory(bomb, "architecture.json", 24, "<I", 10)  # file_size
+        with self.assertRaises(ValueError):
+            Model.load(bomb)
+
+    def test_load_weights_over_limit_names_kwarg(self):
+        """Weights larger than max_weights_bytes are rejected with the kwarg to raise."""
+        self._save_mlp_members()
+        with self.assertRaisesRegex(ValueError, "max_weights_bytes=100;"):
+            Model.load(self.save_path, max_weights_bytes=100)
+
+    def test_load_rejects_file_larger_than_combined_cap(self):
+        """The on-disk size is capped before the central directory is parsed."""
+        model = Model()
+        model.add(Dense(self.NUM_FEATURES, 4096))
+        model.finalize((self.NUM_FEATURES,))
+        model.save(self.save_path)
+        with self.assertRaisesRegex(ValueError, "on disk"):
+            Model.load(self.save_path, max_manifest_bytes=1000, max_weights_bytes=1000)
+
+    def test_load_rejects_fifo_without_blocking(self):
+        """A path that is not a regular file is rejected instead of hanging the open."""
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("FIFOs are POSIX-only")
+        fifo = os.path.join(self.temp_dir, "pipe.aether")
+        os.mkfifo(fifo)
+        with self.assertRaisesRegex(ValueError, "not a regular file"):
+            Model.load(fifo)
+
+    def test_load_rejects_unexpected_archive_members(self):
+        """Archives must hold exactly the two members, stored as save() writes them."""
+        manifest_bytes, weights_bytes = self._save_mlp_members()
+        cases = {
+            "extra member": [("architecture.json", manifest_bytes), ("weights.safetensors", weights_bytes),
+                             ("payload.bin", b"x")],
+            "duplicate manifest": [("architecture.json", manifest_bytes), ("architecture.json", b"{}"),
+                                   ("weights.safetensors", weights_bytes)],
+            "missing weights": [("architecture.json", manifest_bytes)],
+            "deflated weights": [("architecture.json", manifest_bytes),
+                                 ("weights.safetensors", weights_bytes, zipfile.ZIP_DEFLATED)],
+        }
+        for case, members in cases.items():
+            with self.subTest(case=case), self.assertRaises(ValueError):
+                Model.load(self._write_archive(*members))
+
+    def test_load_rejects_encrypted_member(self):
+        """A member flagged as encrypted is rejected instead of raising RuntimeError."""
+        self._save_mlp_members()
+        self._patch_central_directory(self.save_path, "architecture.json", 8, "<H", 0x1)  # flag_bits
+        with self.assertRaisesRegex(ValueError, "encrypted"):
+            Model.load(self.save_path)
+
+    def test_load_rejects_malformed_manifest(self):
+        """Structurally invalid manifests raise ValueError, never another exception type."""
+        def set_layer(key, value):
+            return lambda m: m["layers"][0].__setitem__(key, value)
+
+        mutations = {
+            "input_shape str": lambda m: m.__setitem__("input_shape", "abc"),
+            "input_shape negative": lambda m: m.__setitem__("input_shape", [-1]),
+            "input_shape bool": lambda m: m.__setitem__("input_shape", [True]),
+            "input_shape missing": lambda m: m.pop("input_shape"),
+            "class_name int": set_layer("class_name", 3),
+            "config str": set_layer("config", "abc"),
+            "index mismatch": set_layer("index", 5),
+            "NaN": lambda m: m.__setitem__("seed", float("nan")),
+            "compile entry str": lambda m: m.__setitem__("compile", {"loss": "Loss"}),
+        }
+        for case, mutate in mutations.items():
+            with self.subTest(case=case), self.assertRaises(ValueError):
+                Model.load(self._write_manifest_archive(mutate))
+
+        manifest_bytes, weights_bytes = self._save_mlp_members()
+        raw_manifests = {
+            "top level list": b"[]",
+            "duplicate keys": manifest_bytes.rstrip()[:-1] + b', "layers": []}',
+            "deep nesting": b"[" * 10_000 + b"]" * 10_000,
+            "invalid utf-8": b"\xff\xfe{}",
+        }
+        for case, raw in raw_manifests.items():
+            path = self._write_archive(("architecture.json", raw), ("weights.safetensors", weights_bytes))
+            with self.subTest(case=case), self.assertRaises(ValueError):
+                Model.load(path)
+
+    def test_load_rejects_garbage_weights(self):
+        """Weights that are not safetensors raise ValueError."""
+        manifest_bytes, _ = self._save_mlp_members()
+        path = self._write_archive(("architecture.json", manifest_bytes), ("weights.safetensors", b"\x08" * 64))
+        with self.assertRaisesRegex(ValueError, "safetensors"):
+            Model.load(path)
+
+    def test_load_rejects_oversized_dimensions_before_allocating(self):
+        """A tiny archive cannot request a huge allocation through its manifest."""
+        def huge_dense(manifest):
+            manifest["layers"][0]["config"].update(n_inputs=10**7, n_neurons=10**7)
+
+        with self.assertRaisesRegex(ValueError, "dimension"):
+            Model.load(self._write_manifest_archive(huge_dense))
+
+    def test_failed_load_leaves_backend_unchanged(self):
+        """A rejected archive never switches the process-wide backend."""
+        if not config.HAS_CUPY:
+            self.skipTest("needs a second backend")
+        other = "numpy" if self.backend_name == "cupy" else "cupy"
+        bad_path = self._save_with_rewritten_weights(lambda w: w.pop("2.weights"))
+        with self.assertRaises(ValueError):
+            Model.load(bad_path, device=other)
+        self.assertIs(config.xp, self.xp)
 
     # ---- Basic Architecture & Parameter Hydration Tests ----
 
