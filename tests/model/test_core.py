@@ -5,6 +5,8 @@ from aether.layers.linear import Dense
 from aether.layers.activations import SoftMax
 from aether.losses import SoftmaxCategoricalCrossEntropy
 from aether.optimizers import Adam
+from aether.metrics import CategoricalAccuracy
+from aether.preprocessing import StandardScaler
 from aether._utils import NullAccuracy, NullOptimizer
 
 
@@ -115,6 +117,38 @@ class TestModelCore(ModelBaseTestCase):
 
         with self.assertRaises(RuntimeError):
             model.finalize((self.NUM_FEATURES,))
+
+    def test_configure_after_finalize_raises(self):
+        """Ensure finalize()-wired components cannot be swapped out afterwards."""
+        model = Model()
+        model.add(Dense(self.NUM_FEATURES, self.NUM_CLASSES))
+        model.configure(loss=SoftmaxCategoricalCrossEntropy(), optimizer=Adam())
+        model.finalize((self.NUM_FEATURES,))
+
+        for component in (
+            {"loss": SoftmaxCategoricalCrossEntropy()},
+            {"optimizer": Adam()},
+            {"accuracy": CategoricalAccuracy()},
+            {"preprocessor": StandardScaler()},
+        ):
+            with self.subTest(component=next(iter(component))), self.assertRaises(RuntimeError):
+                model.configure(**component)
+
+    def test_finalize_propagates_type_error_from_build(self):
+        """Ensure a TypeError raised inside build() surfaces instead of triggering a retry."""
+        class BrokenBuildLayer(SpyLifecycleLayer):
+            build_calls = 0
+
+            def build(self, input_shape, seed=None):
+                self.build_calls += 1
+                raise TypeError("genuine bug inside build")
+
+        layer = BrokenBuildLayer()
+        model = Model()
+        model.add(layer)
+        with self.assertRaisesRegex(TypeError, "genuine bug inside build"):
+            model.finalize((self.NUM_FEATURES,))
+        self.assertEqual(layer.build_calls, 1)
 
     def test_finalize_empty_model_raises(self):
         """Verify that finalizing an empty model raises a RuntimeError."""

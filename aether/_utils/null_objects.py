@@ -19,10 +19,6 @@ class NullOptimizer:
     def step(self):
         pass
 
-    @property
-    def current_learning_rate(self):
-        return None
-
 class _NullProgress:
     """
     No-op stand-in for ``TrainingProgress`` used when ``verbose == 0``.

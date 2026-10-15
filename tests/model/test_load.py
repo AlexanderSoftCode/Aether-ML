@@ -82,6 +82,62 @@ class TestModelLoadBase(base_case.AetherBaseTestCase):
             Model.load(corrupt_save_path)
         self.assertIn("HypotheticalAlienLayer", str(ctx.exception))
 
+    def _save_with_rewritten_weights(self, rewrite):
+        """Saves a small MLP, then rewrites its weight dict via `rewrite`."""
+        import safetensors.numpy
+
+        model = Model()
+        model.add(Dense(self.NUM_FEATURES, 16))
+        model.add(ReLU())
+        model.add(Dense(16, self.NUM_CLASSES))
+        model.finalize((self.NUM_FEATURES,))
+        model.save(self.save_path)
+
+        with zipfile.ZipFile(self.save_path, "r") as zipf:
+            manifest_bytes = zipf.read("architecture.json")
+            weights = safetensors.numpy.load(zipf.read("weights.safetensors"))
+
+        rewrite(weights)
+        bad_path = os.path.join(self.temp_dir, "bad_weights.aether")
+        with zipfile.ZipFile(bad_path, "w") as zipf:
+            zipf.writestr("architecture.json", manifest_bytes)
+            zipf.writestr("weights.safetensors", safetensors.numpy.save(weights))
+        return bad_path
+
+    def test_load_missing_weights_raises(self):
+        """Ensure an archive lacking a parameter fails instead of keeping random init."""
+        bad_path = self._save_with_rewritten_weights(lambda w: w.pop("2.weights"))
+        with self.assertRaisesRegex(ValueError, "2.weights"):
+            Model.load(bad_path)
+
+    def test_load_unexpected_weights_raises(self):
+        """Ensure an archive carrying a parameter the graph has no slot for fails."""
+        def add_stray(weights):
+            weights["7.weights"] = np.zeros(1, dtype=np.float32)
+
+        bad_path = self._save_with_rewritten_weights(add_stray)
+        with self.assertRaisesRegex(ValueError, "7.weights"):
+            Model.load(bad_path)
+
+    def test_load_mis_shaped_weights_raises(self):
+        """Ensure a parameter whose shape disagrees with the rebuilt layer fails."""
+        def reshape(weights):
+            weights["0.weights"] = np.zeros((2, 2), dtype=np.float32)
+
+        bad_path = self._save_with_rewritten_weights(reshape)
+        with self.assertRaisesRegex(ValueError, "0.weights"):
+            Model.load(bad_path)
+
+    def test_load_wrong_dtype_weights_raises(self):
+        """Ensure a correctly shaped parameter of the wrong dtype fails, since the
+        fused GPU kernels would otherwise write float32 past the end of its buffer."""
+        def downcast(weights):
+            weights["0.weights"] = weights["0.weights"].astype(np.uint8)
+
+        bad_path = self._save_with_rewritten_weights(downcast)
+        with self.assertRaisesRegex(ValueError, "0.weights.*uint8"):
+            Model.load(bad_path)
+
     # ---- Basic Architecture & Parameter Hydration Tests ----
 
     def test_basic_mlp_graph_reconstruction_and_parameter_parity(self):

@@ -41,6 +41,21 @@ class TestModelPredict(ModelBaseTestCase):
         with self.assertRaises(RuntimeError):
             model.predict(self.X_val)
 
+    def test_predict_rejects_invalid_batch_size_and_empty_input(self):
+        """Verify a non-positive batch_size or empty X raises ValueError instead of
+        dividing by zero or returning None."""
+        model = Model()
+        model.to(self.backend_name)
+        model.add(Dense(self.NUM_FEATURES, self.NUM_CLASSES))
+        model.finalize((self.NUM_FEATURES,))
+
+        for batch_size in (0, -1):
+            with self.subTest(batch_size=batch_size), self.assertRaisesRegex(ValueError, "batch_size"):
+                model.predict(self.X_val, batch_size=batch_size)
+
+        with self.assertRaisesRegex(ValueError, "empty input"):
+            model.predict(self.X_val[:0])
+
     def test_predict_stream_to_host_flag(self):
         """Verify stream_to_host controls whether outputs are NumPy or device arrays."""
         model = Model()
