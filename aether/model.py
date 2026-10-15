@@ -35,6 +35,7 @@ _SHUFFLE_STREAM_ID = 0xFFFFFFFF
 # Preprocessors are absent: their configs nest further {class_name, config}
 # entries, so they resolve through aether.preprocessing.deserialize instead.
 _COMPONENT_NAMESPACES = {
+    "layer": (layer_module, Layer),
     "loss": (loss_module, loss_module.Loss),
     "optimizer": (optimizer_module, optimizer_module.Optimizer),
     "accuracy": (metric_module, metric_module.Accuracy),
@@ -49,8 +50,19 @@ def _serialize_component(obj):
     }
 
 
+def _flat_parameters(layers):
+    """Flattens every layer's parameters into the '{index}.{name}' keys the
+    weights archive is stored under."""
+    return {
+        f"{idx}.{name}": tensor
+        for idx, layer in enumerate(layers)
+        for name, tensor in layer.get_parameters().items()
+        if tensor is not None
+    }
+
+
 def _resolve_component(entry, kind):
-    """Reconstructs a training component from a {class_name, config} manifest entry."""
+    """Reconstructs a layer or training component from a {class_name, config} manifest entry."""
     if not entry:
         return None
 
@@ -90,6 +102,9 @@ class Model():
         self.optimizer = None
         self.accuracy = None
         self.preprocessor = None
+        self.device = None
+        self.precision_policy = None
+        self.trainable_layers = []
         self._seed = None
         self._predict_activation = None
         self._rng_clock = None
@@ -130,7 +145,14 @@ class Model():
         for the model.
 
         Each argument, if provided, is validated against its expected base class.
+
+        Raises:
+            RuntimeError: If called after `finalize()`, which has already wired
+                these components into the graph.
         """
+        if self.is_finalized:
+            raise RuntimeError("Cannot reconfigure model after finalize() has been called.")
+
         if loss is None and optimizer is None and accuracy is None and preprocessor is None:
             raise ValueError(
                 "At least one component (loss, optimizer, metrics, or preprocessor)"
@@ -174,18 +196,12 @@ class Model():
 
     def _sync_device(self, target_device=None):
         """Internal dispatch that compiles all registered components for the active backend."""
-        dev = target_device or getattr(self, "device", None)
+        dev = target_device or self.device
         if dev is None:
             return
 
         # Consolidate all model items (layers + training modules)
-        components = [
-            *self.layers,
-            getattr(self, "loss", None),
-            getattr(self, "optimizer", None),
-            getattr(self, "accuracy", None),
-            getattr(self, "preprocessor", None),
-        ]
+        components = [*self.layers, self.loss, self.optimizer, self.accuracy, self.preprocessor]
 
         for comp in components:
             if comp is not None and hasattr(comp, "_compile_for_device"):
@@ -278,9 +294,9 @@ class Model():
                 "[aether] Cannot finalize an empty model. Please add layers via Model.add() first."
             )
 
-        # Reuse a clock restored by load(); otherwise start a fresh stream at step 0.
-        if getattr(self, "_rng_clock", None) is None:
-            self._rng_clock = config.TrainingClock()
+        # The step clock is not persisted by save(), so every finalize() -- including
+        # the one inside load() -- starts the stochastic streams fresh at step 0.
+        self._rng_clock = config.TrainingClock()
 
         self._shuffle_rng = np.random.default_rng(
             config.derive_stream_seed(self._seed, _SHUFFLE_STREAM_ID)
@@ -289,11 +305,7 @@ class Model():
         current_shape = input_shape
         for idx, layer in enumerate(self.layers):
             layer_seed = (self._seed + idx) if self._seed is not None else None
-            # Unconditionally build and propagate shape
-            try:
-                current_shape = layer.build(current_shape, seed=layer_seed)
-            except TypeError:
-                current_shape = layer.build(current_shape)
+            current_shape = layer.build(current_shape, seed=layer_seed)
 
             # Stochastic layers derive a per-stream key from the model seed and their
             # position in the graph, and share the model-wide step counter.
@@ -303,8 +315,6 @@ class Model():
                     stream_id=idx,
                     clock=self._rng_clock,
                 )
-
-        self._stochastic_layers = [layer for layer in self.layers if layer.is_stochastic]
 
         self.trainable_layers = [
             layer for layer in self.layers
@@ -336,38 +346,53 @@ class Model():
         if self.preprocessor is None:
             self.preprocessor = NullPreprocessor()
 
-        precision_policy = getattr(self, "precision_policy", None)
-        if precision_policy is not None and not getattr(
+        if self.precision_policy is not None and not getattr(
             self.preprocessor, "_precision_exempt", False
         ):
-            self.preprocessor._apply_precision(precision_policy)
+            self.preprocessor._apply_precision(self.precision_policy)
 
-        if getattr(self, "device", None) is None:
+        if self.device is None:
             self.device = "cupy" if getattr(config.xp, "__name__") == "cupy" else "numpy"
 
         self._sync_device()
         self.is_finalized = True
 
-    def _check_ready(self, op_name, need_fitted=False):
-        """Guard shared by train/evaluate/predict: the model must be finalized,
-        and -- for evaluate/predict, which never fit on the caller's behalf --
-        the attached preprocessor must already be fitted.
-        """
+    def _check_ready(self, op_name):
+        """Guard shared by train/evaluate/predict: the model must be finalized."""
         if not self.is_finalized:
             raise RuntimeError(
                 f"[aether] Model must be explicitly finalized before {op_name}. "
                 "Call model.finalize(input_shape) first."
             )
-        if need_fitted and not self.preprocessor.is_fitted:
+
+    def _check_fitted(self, op_name):
+        """Guard shared by train/evaluate/predict: the attached preprocessor must be
+        fitted. train() runs it after its own optional fit, evaluate/predict up front."""
+        if not self.preprocessor.is_fitted:
             raise RuntimeError(
                 f"[aether] The attached preprocessing pipeline is not fitted, so {op_name} "
                 "would run on untransformed data. Fit the pipeline before attaching it "
-                "(e.g. Compose([...]).fit(X_train)), or train the model first -- "
-                "model.train() fits an unfitted pipeline automatically."
+                "(e.g. Compose([...]).fit(X_train)), or let model.train() fit it by "
+                "omitting fit_preprocessor or passing fit_preprocessor=True."
             )
 
     def _has_pipeline(self):
-        return self.preprocessor is not None and not isinstance(self.preprocessor, NullPreprocessor)
+        return not isinstance(self.preprocessor, NullPreprocessor)
+
+    @staticmethod
+    def _batch_slices(num_samples, batch_size):
+        """Splits [0, num_samples) into contiguous (start, end) mini-batch bounds.
+        A `batch_size` of None yields a single full batch."""
+        if num_samples == 0:
+            raise ValueError("[aether] Received an empty input; X must hold at least one sample.")
+        if batch_size is None:
+            batch_size = num_samples
+        elif batch_size < 1:
+            raise ValueError(f"[aether] batch_size must be a positive integer, got {batch_size}.")
+        return [
+            (start, min(start + batch_size, num_samples))
+            for start in range(0, num_samples, batch_size)
+        ]
 
     def _assert_pipeline_device(self, X):
         """Probe the attached pipeline once and confirm it emits on the model's device.
@@ -380,7 +405,7 @@ class Model():
         Raises:
             TypeError: If the pipeline's output does not live on the model's device.
         """
-        expected_backend = getattr(self, "device", "numpy")
+        expected_backend = self.device
         probe = self.preprocessor.transform(X[:1])
         actual_backend = "cupy" if type(probe).__module__.startswith("cupy") else "numpy"
 
@@ -409,7 +434,7 @@ class Model():
             callable: Identity when `y` already matches the model's device,
             otherwise a `config.to_device` partial bound to that device.
         """
-        expected_backend = getattr(self, "device", "numpy")
+        expected_backend = self.device
         is_y_cupy = type(y).__module__.startswith("cupy")
 
         if (expected_backend == "cupy") == is_y_cupy:
@@ -418,7 +443,7 @@ class Model():
 
     def _assert_device_alignment(self, X, y=None):
         """Ensure incoming input tensors strictly match the configured hardware backend."""
-        expected_backend = getattr(self, "device", "numpy")
+        expected_backend = self.device
         
         is_x_cupy = type(X).__module__.startswith("cupy")
         is_y_cupy = type(y).__module__.startswith("cupy") if y is not None else is_x_cupy
@@ -540,13 +565,7 @@ class Model():
                 )
             self.preprocessor.fit(X)
 
-        if not self.preprocessor.is_fitted:
-            raise RuntimeError(
-                "[aether] The attached preprocessing pipeline is not fitted, so training "
-                "would run on untransformed data. Fit the pipeline before attaching it "
-                "(e.g. Compose([...]).fit(X_train)), pass fit_preprocessor=True to fit it "
-                "now, or omit fit_preprocessor to let train() fit it automatically."
-            )
+        self._check_fitted("training")
 
         if has_pipeline:
             self._assert_pipeline_device(X)
@@ -557,13 +576,8 @@ class Model():
         y = config.to_device(y, target="cupy" if xp.__name__ == "cupy" else "numpy")
 
         num_samples = len(X)
-        effective_batch_size = batch_size if batch_size is not None else num_samples
-        train_steps = (num_samples + effective_batch_size - 1) // effective_batch_size
-
-        batch_slices = [
-            (step * effective_batch_size, min((step + 1) * effective_batch_size, num_samples))
-            for step in range(train_steps)
-        ]
+        batch_slices = self._batch_slices(num_samples, batch_size)
+        train_steps = len(batch_slices)
 
         if shuffle:
             def get_batch(epoch_indices, start_idx, end_idx):
@@ -589,31 +603,20 @@ class Model():
             or getattr(layer, "weight_regularizer_l2", 0.0) > 0.0
             or getattr(layer, "bias_regularizer_l1", 0.0) > 0.0
             or getattr(layer, "bias_regularizer_l2", 0.0) > 0.0
-            for layer in getattr(self, "trainable_layers", [])
+            for layer in self.trainable_layers
         )
-        reg_loss_fn = loss.regularization_loss if has_reg else None
+        reg_loss_fn = loss.regularization_loss if has_reg else (lambda: 0.0)
 
-        if has_reg:
-            def run_step(batch_X, batch_y):
-                advance_rng()
-                out = forward_fn(batch_X, training=True)
-                data_l = loss.calculate(out, batch_y)
-                reg_l = reg_loss_fn()
-                acc_l = accuracy.calculate(out, batch_y)
-                loss.backward(out, batch_y)
-                backward_fn(loss.dinputs)
-                step_optimizer()
-                return data_l, reg_l, acc_l
-        else:
-            def run_step(batch_X, batch_y):
-                advance_rng()
-                out = forward_fn(batch_X, training=True)
-                data_l = loss.calculate(out, batch_y)
-                acc_l = accuracy.calculate(out, batch_y)
-                loss.backward(out, batch_y)
-                backward_fn(loss.dinputs)
-                step_optimizer()
-                return data_l, 0.0, acc_l
+        def run_step(batch_X, batch_y):
+            advance_rng()
+            out = forward_fn(batch_X, training=True)
+            data_l = loss.calculate(out, batch_y)
+            reg_l = reg_loss_fn()
+            acc_l = accuracy.calculate(out, batch_y)
+            loss.backward(out, batch_y)
+            backward_fn(loss.dinputs)
+            step_optimizer()
+            return data_l, reg_l, acc_l
 
         get_lr = lambda: getattr(optimizer_obj, "current_lr", getattr(optimizer_obj, "lr", None))
 
@@ -695,23 +698,18 @@ class Model():
             Do not pass manually pre-transformed data if a pipeline is attached to avoid
             duplicate transformations.
         """
-        self._check_ready("evaluation", need_fitted=True)
+        self._check_ready("evaluation")
+        self._check_fitted("evaluation")
         if self._has_pipeline():
             self._assert_pipeline_device(X)
         else:
             self._assert_device_alignment(X, y)
-        num_samples = len(X)
-        effective_batch_size = batch_size if batch_size is not None else num_samples
-        eval_steps = (num_samples + effective_batch_size - 1) // effective_batch_size
-
+        batch_slices = self._batch_slices(len(X), batch_size)
 
         has_loss = self.loss is not None
-        has_acc = self.accuracy is not None
-
         if has_loss:
             self.loss.new_pass()
-        if has_acc:
-            self.accuracy.new_pass()
+        self.accuracy.new_pass()
 
         # Cache local forward function
         forward_fn = self.forward
@@ -720,11 +718,7 @@ class Model():
         prepare_input = self.preprocessor.transform
         prepare_target = self._make_target_preparer(y)
 
-
-        for step in range(eval_steps):
-            start_idx = step * effective_batch_size
-            end_idx = min(start_idx + effective_batch_size, num_samples)
-
+        for start_idx, end_idx in batch_slices:
             batch_X = prepare_input(X[start_idx:end_idx])
             batch_y = prepare_target(y[start_idx:end_idx])
 
@@ -734,13 +728,10 @@ class Model():
             # Accumulate batch metrics without tracking gradients or regularization
             if has_loss:
                 loss.calculate(output, batch_y, training=False)
-
-            if has_acc:
-                accuracy.calculate(output, batch_y)
-
+            accuracy.calculate(output, batch_y)
 
         val_loss = float(loss.calculate_accumulated(include_regularization=False)) if has_loss else 0.0
-        val_acc = float(accuracy.calculate_accumulated()) if has_acc else 0.0
+        val_acc = float(accuracy.calculate_accumulated())
 
         if verbose: 
             print(f"[Validation] loss: {val_loss:.4f} - acc: {val_acc:.4f}")
@@ -780,15 +771,15 @@ class Model():
             Do not pass manually pre-transformed data if a pipeline is attached to avoid
             duplicate transformations.
         """
-        self._check_ready("prediction", need_fitted=True)
+        self._check_ready("prediction")
+        self._check_fitted("prediction")
         if self._has_pipeline():
             self._assert_pipeline_device(X)
         else:
             self._assert_device_alignment(X)
 
         num_samples = len(X)
-        effective_batch_size = batch_size if batch_size is not None else num_samples
-        prediction_steps = (num_samples + effective_batch_size - 1) // effective_batch_size
+        batch_slices = self._batch_slices(num_samples, batch_size)
 
         forward_fn = self.forward
         prepare_input = self.preprocessor.transform
@@ -797,10 +788,7 @@ class Model():
 
         output_buffer = None
 
-        for step in range(prediction_steps):
-            start_idx = step * effective_batch_size
-            end_idx = min(start_idx + effective_batch_size, num_samples)
-
+        for start_idx, end_idx in batch_slices:
             batch_output = forward_fn(prepare_input(X[start_idx:end_idx]), training=False)
             if apply_activation:
                 act_out = activation.forward(batch_output, training=False)
@@ -859,9 +847,7 @@ class Model():
         # Capture Top-Level Config & Layer Manifest
         input_shape = self.layers[0].input_shape
         precision_str = (
-            self.precision_policy.compute_dtype_name
-            if getattr(self, "precision_policy", None)
-            else None
+            self.precision_policy.compute_dtype_name if self.precision_policy else None
         )
 
         arch_manifest = {
@@ -885,13 +871,10 @@ class Model():
             ],
         }
 
-        weight_dict = {}
-        for idx, layer in enumerate(self.layers):
-            for name, tensor in layer.get_parameters().items():
-                if tensor is None:
-                    continue
-                cpu_array = config.to_device(tensor, target="numpy")
-                weight_dict[f"{idx}.{name}"] = np.ascontiguousarray(cpu_array)
+        weight_dict = {
+            key: np.ascontiguousarray(config.to_device(tensor, target="numpy"))
+            for key, tensor in _flat_parameters(self.layers).items()
+        }
 
         weights_bytes = safetensors.numpy.save(weight_dict)
         arch_json_bytes = json.dumps(arch_manifest, indent=2).encode("utf-8")
@@ -921,7 +904,17 @@ class Model():
             ImportError: If safetensors is not installed.
             FileNotFoundError: If the archive does not exist.
             ValueError: If the manifest was written by a newer schema major version,
-                or references an unknown layer/component class.
+                references an unknown layer/component class, or its stored weights
+                are missing, unexpected, or of the wrong shape or dtype for the
+                rebuilt architecture.
+
+        Note:
+            Loading calls `Model.to()` on the new model, which switches aether's
+            global execution backend. Passing `device` therefore retargets every
+            model in the process, not just the loaded one -- e.g. loading with
+            `device="numpy"` while another model trains on CuPy moves that model's
+            backend to NumPy too. Call `.to()` on the other model afterwards to
+            switch back.
 
         Warns:
             UserWarning: If the manifest carries a newer schema minor version.
@@ -988,23 +981,14 @@ class Model():
         if manifest.get("seed") is not None:
             model.manual_seed(manifest["seed"])
 
-        # Reconstruct Layers (Inline, tuple-sanitized, subclass-checked)
+        # Reconstruct Layers. JSON has no tuples, so shape-like config values come
+        # back as lists and are restored to the tuples the constructors expect.
         for layer_entry in manifest.get("layers", []):
-            class_name = layer_entry["class_name"]
-            cfg = layer_entry.get("config", {})
-
-            sanitized_cfg = {
+            cfg = {
                 k: tuple(v) if isinstance(v, list) else v
-                for k, v in cfg.items()
+                for k, v in (layer_entry.get("config") or {}).items()
             }
-
-            layer_cls = getattr(layer_module, class_name, None)
-            if layer_cls is None:
-                raise ValueError(f"[aether] Unknown layer class '{class_name}' found in saved manifest.")
-            if layer_cls is Layer or not (isinstance(layer_cls, type) and issubclass(layer_cls, Layer)):
-                raise TypeError(f"[aether] Manifest entry '{class_name}' is not a valid concrete 'Layer' subclass.")
-
-            model.add(layer_cls(**sanitized_cfg))
+            model.add(_resolve_component({**layer_entry, "config": cfg}, "layer"))
 
         # Reconstruct Training Components (Via table-driven helper)
         compile_cfg = manifest.get("compile") or {}
@@ -1024,24 +1008,42 @@ class Model():
         input_shape = tuple(manifest["input_shape"])
         model.finalize(input_shape=input_shape)
 
-        # Load & Map Weights
+        # Load & Map Weights. Strict: the archive must hold exactly the parameters the
+        # rebuilt graph expects, so a truncated or mismatched file can never leave a
+        # layer silently running on its fresh random initialization.
+        expected = _flat_parameters(model.layers)
+        missing = sorted(expected.keys() - raw_weights.keys())
+        unexpected = sorted(raw_weights.keys() - expected.keys())
+        if missing or unexpected:
+            raise ValueError(
+                f"[aether] Archive '{path.name}' weights do not match its architecture. "
+                f"Missing: {missing or 'none'}. Unexpected: {unexpected or 'none'}."
+            )
+
+        # Dtype matters as much as shape: the fused GPU kernels (e.g. AdamW) take raw
+        # float* pointers, so a same-shaped uint8 tensor would be written past its end.
+        mismatched = [
+            f"{key} (saved {raw_weights[key].dtype}{raw_weights[key].shape}, "
+            f"expected {tensor.dtype}{tuple(tensor.shape)})"
+            for key, tensor in expected.items()
+            if raw_weights[key].shape != tuple(tensor.shape) or raw_weights[key].dtype != tensor.dtype
+        ]
+        if mismatched:
+            raise ValueError(
+                f"[aether] Archive '{path.name}' has parameter shape/dtype mismatches: "
+                f"{', '.join(mismatched)}."
+            )
+
         layer_param_map: dict[int, dict] = {}
         for flat_key, array in raw_weights.items():
-            if "." not in flat_key:
-                continue
             idx_str, param_name = flat_key.split(".", 1)
-            idx = int(idx_str)
-            if idx not in layer_param_map:
-                layer_param_map[idx] = {}
-
             # Route arrays directly to the resolved target device
-            layer_param_map[idx][param_name] = config.to_device(
+            layer_param_map.setdefault(int(idx_str), {})[param_name] = config.to_device(
                 array, target=target_device
             )
 
         for idx, params in layer_param_map.items():
-            if idx < len(model.layers):
-                model.layers[idx].set_parameters(**params)
+            model.layers[idx].set_parameters(**params)
 
         if manifest.get("precision_policy") is not None:
             model.set_precision(manifest["precision_policy"])
