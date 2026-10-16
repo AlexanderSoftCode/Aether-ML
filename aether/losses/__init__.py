@@ -1,4 +1,4 @@
-from aether._utils._lazy import install_lazy_attrs
+from aether._utils.lazy import install_lazy_attrs
 
 _LOSS_MODULES = {
     "Loss":                                         "aether.losses.categorical_crossentropy",

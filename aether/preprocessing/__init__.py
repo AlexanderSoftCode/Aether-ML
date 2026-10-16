@@ -1,4 +1,4 @@
-from aether._utils._lazy import install_lazy_attrs
+from aether._utils.lazy import install_lazy_attrs
 
 _PREPROCESSING_MODULES = {
     "to_tensor":      "aether.preprocessing.transforms",

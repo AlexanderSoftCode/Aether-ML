@@ -24,7 +24,7 @@ class TestDTypePolicy(base_case.AetherBaseTestCase):
         # Clean up the warning context first
         if hasattr(self, "_warn_ctx"):
             self._warn_ctx.__exit__(None, None, None)
-        
+
         super().tearDown()
 
     # ---- Initialization Guardrails --------------
