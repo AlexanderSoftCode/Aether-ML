@@ -1,4 +1,5 @@
-from importlib.metadata import PackageNotFoundError, version as _dist_version
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _dist_version
 
 from aether._utils.lazy import install_lazy_attrs
 from aether.layers import _LAYER_MODULES

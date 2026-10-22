@@ -1,9 +1,12 @@
 from functools import partial
+
 import numpy as np
+
 import aether.config as config
 from aether.base import Layer
 from aether.custom_kernels import pooling_kernel as gpu_pooling
-from aether.custom_kernels.launch_math import _compute_magic_numbers 
+from aether.custom_kernels.launch_math import _compute_magic_numbers
+
 
 class _PoolNd(Layer):
     """Base class for MaxPool2d and AvgPool2d
@@ -61,7 +64,7 @@ class _PoolNd(Layer):
         else:
             raise ValueError(f"Expected padding == valid or same, recieved {self.padding} instead")
         return H_out, W_out, pad_top, pad_bottom, pad_left, pad_right
-    
+
     def _prepare_forward_input(self, inputs, pad_value):
         """Shared shape validation + padding for pooling forward passes.
         pad_value differs by pooling type: -inf for max, 0.0 for average."""
@@ -70,7 +73,7 @@ class _PoolNd(Layer):
             raise ValueError(f"Expected a 4D tensor, recieved {inputs.ndim}D tensor instead")
 
         inputs = inputs.astype(xp.float32, copy=False)
-        S, H_in, W_in, C = inputs.shape
+        S, H_in, W_in, _ = inputs.shape
         H_out, W_out, pad_top, pad_bottom, pad_left, pad_right = self._get_padded_input(H_in, W_in)
 
         self.pad_top, self.pad_bottom = pad_top, pad_bottom
@@ -90,7 +93,7 @@ class _PoolNd(Layer):
 
         inputs_padded = xp.ascontiguousarray(inputs_padded)
         return xp, inputs_padded, S, H_out, W_out
-    
+
     def _get_shape_meta(self, input_shape, block_z):
             """
             Based on deprecated _PoolNd._get_launch_geometry
@@ -130,8 +133,8 @@ class _PoolNd(Layer):
             grid_z = (H_out * S + block_z - 1) // block_z
             grid_dim = (grid_x, grid_y, grid_z)
 
-            # Since GPU doesn't have dedicated GPU divsion units, perform the divsion 
-            # algorithm needed to unsplit the grid_z axis on the CPU instead. 
+            # Since GPU doesn't have dedicated GPU divsion units, perform the divsion
+            # algorithm needed to unsplit the grid_z axis on the CPU instead.
             max_h_s = grid_z * block_z - 1
             magic_scale, magic_shift = _compute_magic_numbers(H_out, max_h_s)
 
@@ -156,14 +159,14 @@ class _PoolNd(Layer):
             }
             self._launch_cache[cache_key] = meta
             return meta
-    
+
     def _forward_gpu_common(self, inputs, pad_value, block_z, kernel, track_indices=False):
         """Shared GPU forward driver for 2D pooling layers.
-        
+
         Handles shape extraction, padding, output (and optional index buffer) allocation,
         geometry memoization, and kernel dispatch.
         """
-        xp, inputs_padded, S, H_out, W_out = self._prepare_forward_input(inputs, pad_value=pad_value)
+        xp, inputs_padded, *_ = self._prepare_forward_input(inputs, pad_value=pad_value)
         meta = self._get_shape_meta(inputs.shape, block_z)
 
         self.inputs_shape = inputs.shape
@@ -225,12 +228,12 @@ class MaxPool2d(_PoolNd):
         Stride step size along (height, width).
     padding : {"same", "valid"}, default="valid"
         Padding mode. "same" pads the spatial borders so output dimensions scale
-        proportionally by stride; "valid" applies no padding and drops boundary 
+        proportionally by stride; "valid" applies no padding and drops boundary
         pixels that do not fit a full window.
 
     Notes
     -----
-    Expected input shape: ``(batch_size, in_height, in_width, channels)``        
+    Expected input shape: ``(batch_size, in_height, in_width, channels)``
     Output shape ``(batch_size, out_height, out_width, channels)``
     """
     def __init__(self, filter_size = (2, 2), stride = (2,2),
@@ -267,7 +270,7 @@ class MaxPool2d(_PoolNd):
             self._kernel_backward_nonoverlap = kernel_backward
 
             self.forward = partial(self._forward_gpu, block_z=block_z)
-    
+
             if self.filter_size == self.stride:
                 self.backward = partial(self._backward_gpu, block_z=block_z)
             else:
@@ -293,7 +296,7 @@ class MaxPool2d(_PoolNd):
             kernel=self._kernel_backward_nonoverlap,
             aux_args=(self.max_indices,),
         )
-    
+
     def _forward_fallback(self, inputs, training):
 
         xp, inputs_padded, S, H_out, W_out = self._prepare_forward_input(inputs, pad_value=-np.inf)
@@ -309,7 +312,7 @@ class MaxPool2d(_PoolNd):
 
         patches = as_strided(
             inputs_padded,
-            shape = (S, H_out, W_out, fH, fW, C), 
+            shape = (S, H_out, W_out, fH, fW, C),
             strides = (
                 inputs_padded.strides[0],      # Step between samples
                 inputs_padded.strides[1] * sH, # Step between rows
@@ -319,7 +322,7 @@ class MaxPool2d(_PoolNd):
                 inputs_padded.strides[3],      # Step between each channel
             )
         )
-        pooled = patches.max(axis = (3, 4)) 
+        pooled = patches.max(axis = (3, 4))
         self.output = pooled
         # Argmax routing is only needed by backward; skip it at inference.
         if not training:
@@ -377,7 +380,7 @@ class AvgPool2d(_PoolNd):
 
     Notes
     -----
-    Expected input shape: ``(batch_size, in_height, in_width, channels)``        
+    Expected input shape: ``(batch_size, in_height, in_width, channels)``
     Output shape ``(batch_size, out_height, out_width, channels)``
     """
     def __init__(self, filter_size = (2, 2), stride = (2,2),
@@ -452,7 +455,7 @@ class AvgPool2d(_PoolNd):
 
         patches = as_strided(
             inputs_padded,
-            shape=(S, H_out, W_out, fH, fW, C), 
+            shape=(S, H_out, W_out, fH, fW, C),
             strides=(
                 inputs_padded.strides[0],      # Step between samples
                 inputs_padded.strides[1] * sH, # Step between rows
@@ -466,7 +469,7 @@ class AvgPool2d(_PoolNd):
         self.output = patches.mean(axis=(3, 4))
         return self.output
 
-    def _backward_fallback(self, dvalues): 
+    def _backward_fallback(self, dvalues):
             xp = config.get_array_module(dvalues)
             as_strided = config.get_stride_utility(xp)
 
@@ -480,20 +483,20 @@ class AvgPool2d(_PoolNd):
             dilated_H = (H_out - 1) * sH + 1
             dilated_W = (W_out - 1) * sW + 1
 
-            dvalues_dilated = xp.zeros((S, dilated_H, dilated_W, C), dtype=dvalues.dtype)                
+            dvalues_dilated = xp.zeros((S, dilated_H, dilated_W, C), dtype=dvalues.dtype)
             dvalues_dilated[:, ::sH, ::sW, :] = dvalues
-            
+
             backward_pad_top = fH - 1
             backward_pad_left = fW - 1
             backward_pad_bottom = H_pad - dilated_H
             backward_pad_right = W_pad - dilated_W
 
             dvalues_padded = xp.pad(
-                dvalues_dilated, 
+                dvalues_dilated,
                 pad_width=(
-                    (0, 0), 
-                    (backward_pad_top, backward_pad_bottom), 
-                    (backward_pad_left, backward_pad_right), 
+                    (0, 0),
+                    (backward_pad_top, backward_pad_bottom),
+                    (backward_pad_left, backward_pad_right),
                     (0, 0)
                 ),
                 mode='constant',
@@ -505,7 +508,7 @@ class AvgPool2d(_PoolNd):
                 strides=(
                     dvalues_padded.strides[0],       # step between samples
                     dvalues_padded.strides[1],       # step down a padded row
-                    dvalues_padded.strides[2],       # step across a padded column 
+                    dvalues_padded.strides[2],       # step across a padded column
                     dvalues_padded.strides[1],       # move down 1 row inside patch
                     dvalues_padded.strides[2],       # move right 1 col inside patch
                     dvalues_padded.strides[3],       # step across channels
@@ -517,26 +520,26 @@ class AvgPool2d(_PoolNd):
 
             # Un-pad gradient back to original input shape
             self.dinputs = dinputs_padded[
-                :, 
-                self.pad_top : self.pad_top + H_in, 
-                self.pad_left : self.pad_left + W_in, 
+                :,
+                self.pad_top : self.pad_top + H_in,
+                self.pad_left : self.pad_left + W_in,
                 :
             ]
             return self.dinputs
 
 class GlobalAvgPool(Layer):
     """
-    Global Average Pooling for NHWC inputs. 
-    
+    Global Average Pooling for NHWC inputs.
+
     Reduces the feature channel to a single scaler by computing the
-    mean over all spatial dimensions (height and width), collpasing 4D input 
+    mean over all spatial dimensions (height and width), collpasing 4D input
     dimensions into 2D feature representations.
 
     Notes
     -----
-    Expected input shape: ``(batch_size, height, width, channels)``        
+    Expected input shape: ``(batch_size, height, width, channels)``
     Output shape ``(batch_size, channels)``
-    
+
     """
     def __init__(self):
         super().__init__()
@@ -544,17 +547,17 @@ class GlobalAvgPool(Layer):
 
     def build(self, input_shape: tuple[int, ...], seed: int | None = None) -> tuple[int, ...]:
         super().build(input_shape)
-    
+
         C_in = input_shape[-1]
-        
-    
+
+
         self.output_shape = (C_in,)
         return self.output_shape
-    
+
     def _get_shape_meta(self, input_shape):
         """
         Similar to _PoolNd._get_shape_meta, however a bit simpler meaning no need
-        to refactor that method to include support for GAP. 
+        to refactor that method to include support for GAP.
         """
         cache_key = (input_shape, self._target_threads)
         cached = self._launch_cache.get(cache_key)
@@ -596,7 +599,7 @@ class GlobalAvgPool(Layer):
 
         if device == "cupy" and config.HAS_CUPY:
             variant, target_threads = config.resolve_gpu_launch_geometry()
-            
+
             self.kernel_forward = gpu_pooling.get_gap_forward_kernel(variant)
             self.kernel_backward = gpu_pooling.get_gap_backward_kernel(variant)
 
@@ -623,7 +626,7 @@ class GlobalAvgPool(Layer):
         # Allocate device array matching (S, C) output shape
         self.output = xp.empty(meta["out_shape"], dtype=xp.float32)
         kernel_args = (inputs, self.output) + meta["static_args"]
-        
+
         self.kernel_forward(meta["grid_dim"], meta["block_dim"], kernel_args)
         return self.output
 
@@ -634,10 +637,10 @@ class GlobalAvgPool(Layer):
 
         self.dinputs = xp.empty(self.inputs_shape, dtype=xp.float32)
         kernel_args = (dvalues, self.dinputs) + meta["static_args"]
-    
+
         self.kernel_backward(meta["grid_dim"], meta["block_dim"], kernel_args)
         return self.dinputs
-    
+
     def _forward_fallback(self, inputs, training):
         xp = config.get_array_module(inputs)
         self.inputs_shape = inputs.shape

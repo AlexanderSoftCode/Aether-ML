@@ -1,12 +1,12 @@
 # tests/model/base.py
 import numpy as np
-import aether.config as config
-from tests.base_case import AetherBaseTestCase
 
+import aether.config as config
 from aether.base import Layer
 from aether.losses import Loss
-from aether.optimizers import Optimizer
 from aether.metrics import Accuracy
+from aether.optimizers import Optimizer
+from tests.base_case import AetherBaseTestCase
 
 
 class SpyLifecycleLayer(Layer):

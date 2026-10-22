@@ -1,5 +1,7 @@
 import functools
+
 import numpy as np
+
 import aether.config as config
 from aether.base import Layer
 from tests.base_case import register_test_suites

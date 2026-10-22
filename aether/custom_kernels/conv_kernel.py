@@ -1,9 +1,9 @@
 import os
 import warnings
-
-import numpy as np
 from dataclasses import dataclass
 from string import Template
+
+import numpy as np
 
 import aether.config as config
 

@@ -1,9 +1,10 @@
 import numpy as np
-from tests.base_case import register_test_suites
-from tests.model.base import ModelBaseTestCase
-from aether.model import Model
+
 from aether.layers.linear import Dense
 from aether.losses import SoftmaxCategoricalCrossEntropy
+from aether.model import Model
+from tests.base_case import register_test_suites
+from tests.model.base import ModelBaseTestCase
 
 
 class TestModelPredict(ModelBaseTestCase):

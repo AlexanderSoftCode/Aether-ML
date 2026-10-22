@@ -1,7 +1,6 @@
 import numpy as np
 
 import tests.base_case as base_case
-
 from aether.preprocessing.transforms import (
     Compose,
     Preprocess,

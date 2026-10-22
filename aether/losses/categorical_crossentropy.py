@@ -1,10 +1,13 @@
 import numpy as np
+
 import aether.config as config
+import aether.custom_kernels.loss_kernel as gpu_loss
+
 # Using Python 3.15 PEP 810: Explicit lazy imports would allow 
 # for the import below to be called lazily, however for best 
 # compatability this project would not use Python 3.15 for this issue
 from aether.layers.activations import SoftMax
-import aether.custom_kernels.loss_kernel as gpu_loss
+
 
 def _to_sparse_labels(xp, y_true):
     """Canonicalize labels to sparse class-index form (S,).

@@ -1,9 +1,10 @@
 import warnings
+
 import numpy as np
 
 import aether.config as config
-from aether.config import DTypePolicy, COMPUTE_DTYPE, PARAM_DTYPE
 import tests.base_case as base_case
+from aether.config import COMPUTE_DTYPE, PARAM_DTYPE, DTypePolicy
 
 
 class TestDTypePolicy(base_case.AetherBaseTestCase):

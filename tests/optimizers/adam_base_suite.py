@@ -1,7 +1,7 @@
 import aether.config as config
 import tests.base_case as base_case
-from aether.layers.linear import Dense
 from aether.layers.conv import Conv2d
+from aether.layers.linear import Dense
 from aether.optimizers.adam import Adam
 
 

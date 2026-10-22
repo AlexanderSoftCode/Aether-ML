@@ -4,7 +4,6 @@ import numpy as np
 
 import aether.config as config
 import tests.base_case as base_case
-
 from aether.layers import Dense, ReLU
 from aether.losses import SoftmaxCategoricalCrossEntropy
 from aether.metrics import CategoricalAccuracy
@@ -17,6 +16,7 @@ from aether.preprocessing.transforms import (
     StandardScaler,
     ToTensor,
 )
+
 N_SAMPLES = 2048
 N_FEATURES = 512
 NUM_CLASSES = 2

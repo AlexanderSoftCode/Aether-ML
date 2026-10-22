@@ -23,9 +23,11 @@ Notes for anyone extending this skeleton:
   return value.
 """
 import unittest
+
 import aether as ae
 import aether.config as config
-from tests.base_case import AetherBaseTestCase, BACKENDS_TO_TEST
+from tests.base_case import BACKENDS_TO_TEST, AetherBaseTestCase
+
 
 # Dynamic Factory Class Generation for Integration Tests
 def make_integration_suite(backend_name):

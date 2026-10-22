@@ -1,7 +1,9 @@
 import numpy as np
+
 import aether.config as config
-from aether.base import Layer
 import aether.custom_kernels.batchnorm_kernel as gpu_bn
+from aether.base import Layer
+
 
 class BatchNorm(Layer):
     """Batch normalization layer over trailing feature channels.

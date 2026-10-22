@@ -1,13 +1,13 @@
+from aether._utils import NullAccuracy, NullOptimizer
+from aether.layers.activations import SoftMax
+from aether.layers.linear import Dense
+from aether.losses import SoftmaxCategoricalCrossEntropy
+from aether.metrics import CategoricalAccuracy
+from aether.model import Model
+from aether.optimizers import Adam
+from aether.preprocessing import StandardScaler
 from tests.base_case import register_test_suites
 from tests.model.base import ModelBaseTestCase, SpyLifecycleLayer, SpySetSeedLayer
-from aether.model import Model
-from aether.layers.linear import Dense
-from aether.layers.activations import SoftMax
-from aether.losses import SoftmaxCategoricalCrossEntropy
-from aether.optimizers import Adam
-from aether.metrics import CategoricalAccuracy
-from aether.preprocessing import StandardScaler
-from aether._utils import NullAccuracy, NullOptimizer
 
 
 class TestModelCore(ModelBaseTestCase):

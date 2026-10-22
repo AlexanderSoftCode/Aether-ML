@@ -1,13 +1,12 @@
 import numpy as np
 
-import aether.config as config
 import tests.base_case as base_case
 from aether.custom_kernels.launch_math import _compute_magic_numbers
 
 
 class TestPoolingMagicNumbers(base_case.AetherBaseTestCase):
     """
-    Regression suite verifying O(1) fast division magic numbers 
+    Regression suite verifying O(1) fast division magic numbers
     against the Hacker's Delight Ch. 10 rounding trap.
     """
 
@@ -83,7 +82,7 @@ class TestPoolingMagicNumbers(base_case.AetherBaseTestCase):
         """Verify shift_amount stays within legal CUDA/HIP bit-shift bounds [0, 63]."""
         for d in [1, 2, 3, 7, 16, 255, 1024, 65535]:
             for max_num in [1, 100, 10000, 2**31 - 1]:
-                scale, shift = _compute_magic_numbers(d, max_num)
+                _, shift = _compute_magic_numbers(d, max_num)
                 shift_amount = 32 + int(shift)
 
                 self.assertGreaterEqual(shift_amount, 0, f"UB: Negative shift for d={d}")
@@ -172,8 +171,8 @@ class TestPoolingMagicNumbers(base_case.AetherBaseTestCase):
 
             expected = np.arange(n_threads, dtype=np.int32)
             np.testing.assert_array_equal(
-                self.to_cpu(out), 
-                expected, 
+                self.to_cpu(out),
+                expected,
                 err_msg="C++ kernel produced incorrect output for shift=-32"
             )
 

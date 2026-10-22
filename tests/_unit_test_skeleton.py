@@ -11,8 +11,10 @@ Architecture Pattern:
 """
 import aether.config as config
 import tests.base_case as base_case
+
 # Replace this with your specific layout import
 from aether.layers.conv import Conv2d
+
 
 # Rewrite `TestLayer` for specific class being tested
 # Also, rewrite the parent class based on if a layer is being tested
@@ -25,7 +27,7 @@ class TestLayer(base_case.AetherBaseLayerTestCase):
     STRIDE = (1, 1)
     PADDING = "same"
     def setUp(self):
-        super().__init__()
+        super().setUp()
         # These below are called in the parent class
         # self.backend_name = backend_name
         # Function from aether.config.py
@@ -37,13 +39,13 @@ class TestLayer(base_case.AetherBaseLayerTestCase):
 
         # Add the layerclass, then add its respective arguments after
         self.layer = self.make_built_layer(
-            Conv2d, filter_size=self.FILTER_SIZE,
-            stride=self.STRIDE, padding=self.PADDING,
+            Conv2d, in_channels=self.INPUT_SHAPE[-1], out_channels=self.NUM_FILTERS,
+            filter_size=self.FILTER_SIZE, stride=self.STRIDE, padding=self.PADDING,
             input_shape=self.INPUT_SHAPE
         )
         self.layer2 = self.make_built_layer(
-            Conv2d, filter_size=self.FILTER_SIZE,
-            stride=self.STRIDE, padding=self.PADDING,
+            Conv2d, in_channels=self.INPUT_SHAPE[-1], out_channels=self.NUM_FILTERS,
+            filter_size=self.FILTER_SIZE, stride=self.STRIDE, padding=self.PADDING,
             input_shape=self.INPUT_SHAPE
         )
         self.test_images = self.xp.random.randn(2, 28, 28, 1)
@@ -58,7 +60,6 @@ class TestLayer(base_case.AetherBaseLayerTestCase):
 
     def test_conv_numerical_gradient_check(self):
         """Verify that analytical backpropagation calculations evaluate properly."""
-        pass
     # Implement more tests if needed by creating more functions
 
 # Below, you would add the helper function for the directiory to be discoverable, be sure
