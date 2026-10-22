@@ -81,19 +81,9 @@ class Conv2d(Layer):
             )
         
         fH, fW = self.filter_size
-        sH, sW = self.stride
 
-        # 1. Compute Output Spatial Dimensions
-        if self.padding == "same":
-            H_out = int(np.ceil(H_in / sH))
-            W_out = int(np.ceil(W_in / sW))
-        elif self.padding == "valid":
-            H_out = int(np.floor((H_in - fH) / sH) + 1)
-            W_out = int(np.floor((W_in - fW) / sW) + 1)
-        else:
-            raise ValueError(f"Unsupported padding mode '{self.padding}'. Use 'same' or 'valid'.")
-
-        self.output_shape = (H_out, W_out, self.C_out)
+        shape_meta = self._get_shape_meta((H_in, W_in, incoming_C_in))
+        self.output_shape = (shape_meta.H_out, shape_meta.W_out, self.C_out)
 
         fan_in = fH * fW * self.C_in
         std = (2.0 / fan_in) ** 0.5
@@ -289,35 +279,18 @@ class Conv2d(Layer):
         sH, sW = self.stride
         S, H_in, W_in, D_in = inputs.shape
 
-        pad_h = (fH - 1) // 2 if self.padding == "same" else 0
-        pad_w = (fW - 1) // 2 if self.padding == "same" else 0
-
-        # Retrieve spatial geometry - keyed on stride/pad too, since both
-        # are mutable instance attrs and this cache is per-instance.
-        spatial_key = (H_in, W_in, D_in, sH, sW, pad_h, pad_w, "fallback")
-        meta = self._launch_cache.get(spatial_key)
-
-        if meta is None:
-            H_out = int((H_in + 2 * pad_h - fH) / sH + 1)
-            W_out = int((W_in + 2 * pad_w - fW) / sW + 1)
-
-            meta = {
-                "pad_h": pad_h,
-                "pad_w": pad_w,
-                "H_out": H_out,
-                "W_out": W_out,
-            }
-            self._launch_cache[spatial_key] = meta
-
-        pad_h, pad_w = meta["pad_h"], meta["pad_w"]
-        H_out, W_out = meta["H_out"], meta["W_out"] 
+        meta = self._get_shape_meta((H_in, W_in, D_in))
+        H_out, W_out = meta.H_out, meta.W_out
+        # Negative bottom/right pads mean trailing rows/cols no window reaches;
+        # the strided view below simply never reads them.
+        pad_bottom, pad_right = max(meta.pad_bottom, 0), max(meta.pad_right, 0)
         # (0, 0) -> don't touch the number of samples in the batch
-        # (P, P) -> pad top and bottom pixels by P pixels (axis 1)
-        # (P, P) -> pad left and right pixels by P pixels (axis 2)
-        # (0, 0) -> don't pad depth. 
+        # (top, bottom) -> pad rows (axis 1)
+        # (left, right) -> pad columns (axis 2)
+        # (0, 0) -> don't pad depth.
         # contstant -> add constant_values for the padded values
-        padded_inputs = xp.pad(array = inputs, 
-                            pad_width = ((0, 0), (pad_h, pad_h), (pad_w, pad_w), (0, 0)),
+        padded_inputs = xp.pad(array = inputs,
+                            pad_width = ((0, 0), (meta.pad_h, pad_bottom), (meta.pad_w, pad_right), (0, 0)),
                             mode = 'constant',
                             constant_values = 0).astype(xp.float32, copy = False)
 
@@ -373,11 +346,9 @@ class Conv2d(Layer):
         # Inject values using step slices
         dvalues_dilated[:, ::sH, ::sW, :] = dvalues
         
-        pad_h = (fH - 1) // 2 if self.padding == "same" else 0
-        pad_w = (fW - 1) // 2 if self.padding == "same" else 0
-
-        pad_top  = (fH - 1) - pad_h
-        pad_left = (fW - 1) - pad_w
+        meta = self._get_shape_meta((H_in, W_in, C_in))
+        pad_top  = (fH - 1) - meta.pad_h
+        pad_left = (fW - 1) - meta.pad_w
         pad_bottom = H_in + fH - 1 - pad_top - dilated_H
         pad_right  = W_in + fW - 1 - pad_left - dilated_W
 

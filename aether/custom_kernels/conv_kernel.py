@@ -35,12 +35,24 @@ class ConvShapeMeta:
     def K_total(self):
         return self.fH * self.fW * self.C_in
 
+    # pad_h/pad_w are the top/left pads the kernels offset by; the bottom/right
+    # pads are never materialized there, the kernels bounds-check them away.
+    @property
+    def pad_bottom(self):
+        return (self.H_out - 1) * self.sH + self.fH - self.H_in - self.pad_h
+
+    @property
+    def pad_right(self):
+        return (self.W_out - 1) * self.sW + self.fW - self.W_in - self.pad_w
+
     @property
     def cache_key(self):
         return (
             self.H_in, self.W_in, self.C_in, self.C_out,
             self.fH, self.fW, self.sH, self.sW,
-            self.pad_h, self.pad_w, self.is_hip,
+            # H_out/W_out are not implied by the rest: 'same' and 'valid' can
+            # share a pad yet differ in output extent.
+            self.pad_h, self.pad_w, self.H_out, self.W_out, self.is_hip,
         )
 
     @classmethod
@@ -57,8 +69,13 @@ class ConvShapeMeta:
         sH, sW = stride
 
         if padding == "same":
-            pad_h, pad_w = (fH - 1) // 2, (fW - 1) // 2
+            # TF convention: total pad covers ceil(in / stride) windows; an odd
+            # total puts the extra pixel on the bottom/right.
+            H_out, W_out = -(-H_in // sH), -(-W_in // sW)
+            pad_h = max((H_out - 1) * sH + fH - H_in, 0) // 2
+            pad_w = max((W_out - 1) * sW + fW - W_in, 0) // 2
         elif padding == "valid":
+            H_out, W_out = (H_in - fH) // sH + 1, (W_in - fW) // sW + 1
             pad_h, pad_w = 0, 0
         else:
             raise ValueError(
@@ -68,8 +85,7 @@ class ConvShapeMeta:
         return cls(
             H_in=H_in, W_in=W_in, C_in=C_in, C_out=C_out,
             fH=fH, fW=fW, sH=sH, sW=sW, pad_h=pad_h, pad_w=pad_w,
-            H_out=int((H_in + 2 * pad_h - fH) / sH + 1),
-            W_out=int((W_in + 2 * pad_w - fW) / sW + 1),
+            H_out=H_out, W_out=W_out,
             is_hip=config.IS_HIP if is_hip is None else is_hip,
         )
 
