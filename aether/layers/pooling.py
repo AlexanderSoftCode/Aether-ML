@@ -595,6 +595,11 @@ class GlobalAvgPool(Layer):
             self.kernel_forward = gpu_pooling.get_gap_forward_kernel(variant)
             self.kernel_backward = gpu_pooling.get_gap_backward_kernel(variant)
 
+            if self.kernel_forward is None or self.kernel_backward is None:
+                self.forward = self._forward_fallback
+                self.backward = self._backward_fallback
+                return
+
             self._variant = variant
             self._target_threads = target_threads
             self.forward = self._forward_gpu
@@ -605,11 +610,13 @@ class GlobalAvgPool(Layer):
 
     def _forward_gpu(self, inputs, training):
         xp = config.cp
+        # The kernel indexes a dense NHWC float* buffer.
+        inputs = xp.ascontiguousarray(inputs, dtype=xp.float32)
         self.inputs_shape = inputs.shape
         meta = self._get_shape_meta(self.inputs_shape)
 
         # Allocate device array matching (S, C) output shape
-        self.output = xp.empty(meta["out_shape"], dtype=inputs.dtype)
+        self.output = xp.empty(meta["out_shape"], dtype=xp.float32)
         kernel_args = (inputs, self.output) + meta["static_args"]
         
         self.kernel_forward(meta["grid_dim"], meta["block_dim"], kernel_args)
@@ -618,8 +625,9 @@ class GlobalAvgPool(Layer):
     def _backward_gpu(self, dvalues):
         xp = config.cp
         meta = self._get_shape_meta(self.inputs_shape)
-        
-        self.dinputs = xp.empty(self.inputs_shape, dtype=dvalues.dtype)
+        dvalues = xp.ascontiguousarray(dvalues, dtype=xp.float32)
+
+        self.dinputs = xp.empty(self.inputs_shape, dtype=xp.float32)
         kernel_args = (dvalues, self.dinputs) + meta["static_args"]
     
         self.kernel_backward(meta["grid_dim"], meta["block_dim"], kernel_args)
