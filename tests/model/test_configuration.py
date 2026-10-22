@@ -1,18 +1,20 @@
 import warnings
+
 import numpy as np
-from tests.base_case import register_test_suites, BACKENDS_TO_TEST
+
+from aether.layers.linear import Dense
+from aether.losses import SoftmaxCategoricalCrossEntropy
+from aether.metrics import CategoricalAccuracy
+from aether.model import Model
+from aether.optimizers import Adam
+from tests.base_case import BACKENDS_TO_TEST, register_test_suites
 from tests.model.base import (
     ModelBaseTestCase,
     SpyLifecycleLayer,
+    SpySyncAccuracy,
     SpySyncLoss,
     SpySyncOptimizer,
-    SpySyncAccuracy,
 )
-from aether.model import Model
-from aether.layers.linear import Dense
-from aether.losses import SoftmaxCategoricalCrossEntropy
-from aether.optimizers import Adam
-from aether.metrics import CategoricalAccuracy
 
 
 class TestModelConfig(ModelBaseTestCase):

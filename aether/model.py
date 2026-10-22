@@ -8,6 +8,7 @@ import zipfile
 import zlib
 from functools import partial
 from pathlib import Path
+
 import numpy as np
 
 import aether.config as config
@@ -16,10 +17,10 @@ import aether.losses as loss_module
 import aether.metrics as metric_module
 import aether.optimizers as optimizer_module
 import aether.preprocessing as transforms_module
-
-from aether.base import Layer
 from aether._utils import NullAccuracy, NullOptimizer, NullPreprocessor
 from aether._utils.progress import make_progress
+from aether.base import Layer
+
 try:
     import safetensors.numpy
 except ImportError:
@@ -272,7 +273,7 @@ def _nonfinite_path(value, where="manifest"):
     )
 
 
-class Model():
+class Model:
     def __init__(self):
         self.layers = []
         self.is_finalized = False
@@ -290,9 +291,9 @@ class Model():
 
     def add(self, layer):
         """Appends a layer to the execution graph."""
-        if self.is_finalized:   
+        if self.is_finalized:
             raise RuntimeError("Cannot modify model after finalize() has been called.")
-        
+
         if not isinstance(layer, Layer):
             raise TypeError(
                 f"Expected an instance of 'Layer', but got '{type(layer).__name__}'. "
@@ -317,7 +318,7 @@ class Model():
         if self.is_finalized:
             raise RuntimeError("Cannot set a new seed after finalize() has been called.")
         self._seed = int(seed)
-    
+
     def configure(self, loss=None, optimizer=None, accuracy=None, preprocessor=None):
         """Configures the training components (loss, optimizer, accuracy metric, preprocessor)
         for the model.
@@ -435,7 +436,7 @@ class Model():
         Sets the target floating-point precision policy on the model and dispatches
         it to every registered layer, skipping any layer marked with the
         `_precision_exempt` attribute, then to the attached preprocessor, which is
-        skipped under the same flag. 
+        skipped under the same flag.
 
         Args:
             compute_dtype (str): The target floating-point precision -- one of
@@ -530,7 +531,7 @@ class Model():
             self.preprocessor._apply_precision(self.precision_policy)
 
         if self.device is None:
-            self.device = "cupy" if getattr(config.xp, "__name__") == "cupy" else "numpy"
+            self.device = "cupy" if config.xp.__name__ == "cupy" else "numpy"
 
         self._sync_device()
         self.is_finalized = True
@@ -622,7 +623,7 @@ class Model():
     def _assert_device_alignment(self, X, y=None):
         """Ensure incoming input tensors strictly match the configured hardware backend."""
         expected_backend = self.device
-        
+
         is_x_cupy = type(X).__module__.startswith("cupy")
         is_y_cupy = type(y).__module__.startswith("cupy") if y is not None else is_x_cupy
 
@@ -636,9 +637,9 @@ class Model():
         else:  # numpy
             if is_x_cupy or is_y_cupy:
                 raise TypeError(
-                    f"[aether] Device mismatch: Model is configured for NumPy backend ('numpy'), "
-                    f"but received CuPy GPU tensors. Transfer your data to host memory via cp.asnumpy() "
-                    f"or migrate the model first via model.to('cupy')."
+                    "[aether] Device mismatch: Model is configured for NumPy backend ('numpy'), "
+                    "but received CuPy GPU tensors. Transfer your data to host memory via cp.asnumpy() "
+                    "or migrate the model first via model.to('cupy')."
                 )
 
     def forward(self, X, training=True):
@@ -912,7 +913,7 @@ class Model():
         val_loss = float(loss.calculate_accumulated(include_regularization=False)) if has_loss else 0.0
         val_acc = float(accuracy.calculate_accumulated())
 
-        if verbose: 
+        if verbose:
             print(f"[Validation] loss: {val_loss:.4f} - acc: {val_acc:.4f}")
 
         return val_loss, val_acc

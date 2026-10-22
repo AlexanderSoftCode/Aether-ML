@@ -1,8 +1,9 @@
 import numpy as np
+
 import aether.config as config
 import tests.base_case as base_case
-
 from aether.layers.pooling import GlobalAvgPool
+
 
 class TestGlobalAvgPool(base_case.AetherBaseLayerTestCase):
     S, H, W, C = 2, 28, 28, 3
@@ -100,6 +101,7 @@ class TestGlobalAvgPool(base_case.AetherBaseLayerTestCase):
         if self.backend_name != 'cupy' or not config.HAS_CUPY:
             self.skipTest("Applies only to CuPy pass")
         from unittest import mock
+
         from aether.custom_kernels import pooling_kernel
         layer = self.make_built_layer(GlobalAvgPool, input_shape=(self.H, self.W, self.C))
         with mock.patch.object(pooling_kernel, "get_gap_forward_kernel", return_value=None):

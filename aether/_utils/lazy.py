@@ -1,5 +1,6 @@
 import importlib
-  
+
+
 def install_lazy_attrs(module_globals, name_map):
     """
     Wire up a lazy __getattr__/__dir__ pair into the CALLING package's

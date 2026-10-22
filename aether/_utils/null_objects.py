@@ -4,6 +4,7 @@ Avoids making us write needless branch conditionals.
 """
 from aether.preprocessing.transforms import Preprocess
 
+
 class NullAccuracy:
     def calculate(self, *args, **kwargs):
         return 0.0

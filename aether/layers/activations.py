@@ -1,6 +1,8 @@
 import numpy as np
+
 import aether.config as config
 from aether.base import Layer
+
 
 class ReLU(Layer):
     """Rectified Linear Unit activation function: `f(x) = max(0, x)`."""

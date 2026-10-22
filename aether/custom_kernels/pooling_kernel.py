@@ -1,4 +1,5 @@
 from string import Template
+
 import aether.config as config
 
 # thread_idx = local coordinate inside the block

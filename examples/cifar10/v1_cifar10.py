@@ -1,9 +1,8 @@
-import aether.config as config 
-import numpy as np
-import cupy as cp
-import aether as ae
-
 from pathlib import Path
+
+import cupy as cp
+
+import aether as ae
 
 TRAIN_DIR = Path("data") / "cifar-10" / "cifar-10_train.npz"
 TEST_DIR  = Path("data") / "cifar-10" / "cifar-10_test.npz"

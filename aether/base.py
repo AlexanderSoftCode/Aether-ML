@@ -1,5 +1,6 @@
 import aether.config as config
 
+
 class Layer:
     """Abstract base class defining shape-inference, parameter routing, and
     state manager for all network layers."""

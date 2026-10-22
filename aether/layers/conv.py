@@ -1,8 +1,10 @@
 import warnings
-import numpy as np
+
 import aether.config as config
 from aether.base import Layer
 from aether.custom_kernels import conv_kernel
+
+
 class Conv2d(Layer):
     """2D Convolutional layer for spatial feature extraction over NHWC inputs.
 
@@ -23,7 +25,7 @@ class Conv2d(Layer):
         L1 penalty. Pass a float for weights only, or (weight, bias).
     l2 : float or tuple, default=()
         L2 penalty. Pass a float for weights only, or (weight, bias).
-    
+
     Warns
     -----
     UserWarning
@@ -31,7 +33,7 @@ class Conv2d(Layer):
         that does not match the active execution path (e.g., requesting a dtype
         other than ``float16`` when bound to the WMMA matrix-core path, or
         requesting non-``float32`` when falling back to strided CPU/GPU kernels).
-    
+
     Notes
     -----
     Expected input shape: ``(batch_size, height, width, in_channels)``
@@ -40,7 +42,7 @@ class Conv2d(Layer):
     Conv2d's compute dtype is bounded to fp16 as WMMA kernels can't take >fp16
     calculations, instead layer will use the fallback vectorized path.
     """
-    
+
     def __init__(self, in_channels, out_channels = 1, filter_size = (3, 3), stride = (1, 1), padding = "same", l1=(), l2=()):
         super().__init__()
         # input_shape has form (batch_size, height, width, channels)
@@ -48,7 +50,7 @@ class Conv2d(Layer):
         self.C_out = out_channels
         self.filter_size = filter_size
         self.stride = stride
-        self.padding = padding 
+        self.padding = padding
 
         self._set_regularizers(l1, l2)
 
@@ -79,7 +81,7 @@ class Conv2d(Layer):
                 f"[aether] Shape mismatch in Conv layer: configured with C_in={self.C_in}, "
                 f"but received input shape with dimension {incoming_C_in} ({input_shape})."
             )
-        
+
         fH, fW = self.filter_size
 
         shape_meta = self._get_shape_meta((H_in, W_in, incoming_C_in))
@@ -100,7 +102,7 @@ class Conv2d(Layer):
 
         self.filter_weights = (raw_weights * std).astype(xp.float32, copy=False)
         self.weights = self.filter_weights
-        
+
         self.biases = xp.zeros(self.C_out, dtype=xp.float32)
 
         return self.output_shape
@@ -185,7 +187,7 @@ class Conv2d(Layer):
         if not self._fp16_weight_valid:
             self._fp16_weight_cache[...] = self.filter_weights.reshape(fH * fW * C_in, C_out).astype(xp.float16)
             self._fp16_weight_valid = True
-    
+
     def invalidate_shadow_caches(self):
         """
         Called by an optimizer after it writes into self.weights'
@@ -281,7 +283,7 @@ class Conv2d(Layer):
         return self.dinputs
 
     def _forward_fallback(self, inputs, training):
-        
+
         xp = config.get_array_module(inputs)
         as_strided = config.get_stride_utility(xp)
         fH, fW = self.filter_size
@@ -319,17 +321,17 @@ class Conv2d(Layer):
             shape=self.patches_shape,
             strides=self.patches_strides)
 
-        # Keep the samples, H_out, W_out, and C_out. 
+        # Keep the samples, H_out, W_out, and C_out.
         # But, iterate over the patch(x, y) with channels c, and with the number of filters d
         self.output = xp.einsum('shwxyc,xycd->shwd', patches, self.filter_weights, optimize=True)
-        self.output += self.biases.reshape((1, 1, 1, self.C_out)) 
+        self.output += self.biases.reshape((1, 1, 1, self.C_out))
 
         # Backward-only caches; dropping them at inference frees an activation.
         self.inputs = inputs if training else None
         self.padded_inputs = padded_inputs if training else None
         return self.output
 
-    
+
     def _backward_fallback(self, dvalues):
         self._require_forward_cache()
         xp = config.get_array_module(dvalues)
@@ -338,7 +340,7 @@ class Conv2d(Layer):
         S, H_out, W_out, C_out = dvalues.shape
         fH, fW, C_in, C_out = self.filter_weights.shape
         sH, sW = self.stride
-        _, H_in, W_in, _ = self.inputs.shape 
+        _, H_in, W_in, _ = self.inputs.shape
 
         patches = as_strided(
             self.padded_inputs,
@@ -350,12 +352,12 @@ class Conv2d(Layer):
         self.dweights = xp.tensordot(patches, dvalues, axes = ([0, 1, 2], [0, 1, 2]))
 
         dilated_H = (H_out - 1) * sH + 1
-        dilated_W = (W_out - 1) * sW + 1 
-        
+        dilated_W = (W_out - 1) * sW + 1
+
         dvalues_dilated = xp.zeros(shape= (S, dilated_H, dilated_W, C_out), dtype= dvalues.dtype)
         # Inject values using step slices
         dvalues_dilated[:, ::sH, ::sW, :] = dvalues
-        
+
         meta = self._get_shape_meta((H_in, W_in, C_in))
         pad_top  = (fH - 1) - meta.pad_h
         pad_left = (fW - 1) - meta.pad_w
@@ -377,7 +379,7 @@ class Conv2d(Layer):
             )
 
         flipped_weights = self.filter_weights[::-1, ::-1, :, :]
-        dvalues_patches = as_strided(dvalues_padded, 
+        dvalues_patches = as_strided(dvalues_padded,
                             shape = (S, H_in, W_in, fH, fW, C_out),
                             strides=(
                                 dvalues_padded.strides[0],  # Batch step
@@ -387,10 +389,10 @@ class Conv2d(Layer):
                                 dvalues_padded.strides[2],  # Internel window pixel col step
                                 dvalues_padded.strides[3]   # Output channel step
                             ))
-    
+
         self.dinputs = xp.tensordot(
-            dvalues_patches, 
-            flipped_weights, 
+            dvalues_patches,
+            flipped_weights,
             axes=([3, 4, 5], [0, 1, 3]) # Match fH, fW, C_out
         )
 

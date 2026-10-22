@@ -1,7 +1,8 @@
 import math
-import numpy as np
+
 import aether.config as config
 from aether.base import Layer
+
 
 class Dense(Layer):
     """Fully connected (Dense) layer.
@@ -50,7 +51,7 @@ class Dense(Layer):
         super().build(input_shape)
         xp = config.xp
 
-        
+
         if self.n_inputs != input_shape[0]:
             raise ValueError(
                 f"[aether] Shape mismatch in Dense layer: configured with n_inputs={self.n_inputs}, "
@@ -59,7 +60,7 @@ class Dense(Layer):
 
         self.input_shape = input_shape
 
-        
+
         std = (2.0 / self.n_inputs) ** 0.5
 
         effective_seed = seed if seed is not None else self.seed
@@ -115,8 +116,8 @@ class Dense(Layer):
             self._inputs_compute = None
             self._weights_compute = None
 
-        return xp.dot(inputs_c, weights_c) + biases_c 
-    
+        return xp.dot(inputs_c, weights_c) + biases_c
+
     def backward(self, dvalues):
 
         xp = config.get_array_module(dvalues)
@@ -165,19 +166,19 @@ class Dense(Layer):
 class Flatten(Layer):
     """Flattens all trailing input dimensions into a 2D tensor
     while preserving the batch dimension.
-    
+
     Notes
     -----
     Expected input shape: ``(batch_size, d_1, d_2, ..., d_n)``
     Output shape: ``(batch_size, d_1 * d_2 * ... * d_n)``
     """
-    def build(self, input_shape: tuple[int, ...], seed: int | None = None) -> tuple[int, ...]:    
+    def build(self, input_shape: tuple[int, ...], seed: int | None = None) -> tuple[int, ...]:
         super().build(input_shape)
-        self.input_shape = input_shape 
-        
+        self.input_shape = input_shape
+
         # Calculate scalar integer dimension using standard library math.prod
         flat_dim = math.prod(input_shape)
-        
+
         self.output_shape = (flat_dim,)
         return self.output_shape
 
@@ -185,7 +186,7 @@ class Flatten(Layer):
         xp = config.get_array_module(inputs)
 
         return xp.ascontiguousarray(inputs.reshape(inputs.shape[0], -1))
-    
+
     def backward(self, dvalues):
         self.dinputs = dvalues.reshape(-1, *self.input_shape)
         return self.dinputs

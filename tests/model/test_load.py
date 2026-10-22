@@ -5,20 +5,21 @@ import struct
 import tempfile
 import warnings
 import zipfile
+
 import numpy as np
 
 import aether.config as config
 import tests.base_case as base_case
-
 from aether.layers.activations import LeakyReLU, ReLU
 from aether.layers.conv import Conv2d
 from aether.layers.linear import Dense, Flatten
 from aether.layers.normalization import BatchNorm
 from aether.layers.pooling import MaxPool2d
 from aether.losses import CategoricalCrossEntropy, SoftmaxCategoricalCrossEntropy
-from aether.optimizers import Adam, AdamW
 from aether.metrics import CategoricalAccuracy
 from aether.model import Model
+from aether.optimizers import Adam, AdamW
+
 
 class TestModelLoadBase(base_case.AetherBaseTestCase):
     __test__ = False

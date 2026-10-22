@@ -2,10 +2,9 @@ import numpy as np
 
 import aether.config as config
 import tests.base_case as base_case
-
 from aether.layers.dropout import Dropout
-from aether.model import Model
 from aether.layers.linear import Dense
+from aether.model import Model
 
 
 class TestDropout(base_case.AetherBaseLayerTestCase):

@@ -1,5 +1,7 @@
 from string import Template
+
 import numpy as np
+
 import aether.config as config
 
 # --- Fused Adam/AdamW update kernel ----------------------------------------------

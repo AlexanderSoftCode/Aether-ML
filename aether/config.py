@@ -36,8 +36,9 @@ Architectural Invariants
 - Explicit GPU targets (enforce_cupy_env) fail fast rather than falling back silently.
 - Layer weights and master parameters stay float32 unless explicitly cast for compute.
 """
-import numpy as np
 import warnings
+
+import numpy as np
 
 # default backend incase user does not have CuPy package
 xp = np

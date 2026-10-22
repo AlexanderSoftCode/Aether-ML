@@ -11,6 +11,7 @@ import shutil
 import sys
 import time
 from typing import Callable, Literal
+
 from aether._utils.null_objects import _NullProgress
 
 RenderMode = Literal["tty", "jupyter", "plain"]

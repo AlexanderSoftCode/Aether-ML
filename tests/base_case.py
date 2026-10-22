@@ -1,8 +1,10 @@
-import warnings
 import unittest
+import warnings
+
 import numpy as np
-from aether.config import set_backend
+
 import aether.config as config
+from aether.config import set_backend
 
 try:
     import safetensors.numpy as safetensors_np

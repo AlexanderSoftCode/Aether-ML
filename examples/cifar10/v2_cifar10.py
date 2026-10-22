@@ -1,11 +1,12 @@
 """
 The setup script found in the README.md pop up
 """
-import aether as ae
-import numpy as np
-import cupy as cp
-
 from pathlib import Path
+
+import cupy as cp
+import numpy as np
+
+import aether as ae
 
 TRAIN_DIR = Path("data") / "cifar-10" / "cifar-10_train.npz"
 TEST_DIR  = Path("data") / "cifar-10" / "cifar-10_test.npz"

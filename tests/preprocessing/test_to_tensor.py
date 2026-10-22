@@ -6,15 +6,14 @@ import numpy as np
 import aether.config as config
 import aether.preprocessing
 import tests.base_case as base_case
-
-from aether.preprocessing.transforms import ToTensor, to_tensor
 from aether.preprocessing._utils import (
-    validate_dtype,
+    convert_single_tensor,
     is_dtype_like,
     parse_inputs,
     resolve_dtypes,
-    convert_single_tensor,
+    validate_dtype,
 )
+from aether.preprocessing.transforms import ToTensor, to_tensor
 
 
 class TestToTensorTransform(base_case.AetherBaseTestCase):

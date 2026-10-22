@@ -5,12 +5,12 @@ from unittest import mock
 
 import numpy as np
 
-from aether.model import Model
+from aether._utils.progress import TrainingProgress, _visible_len, make_progress
 from aether.layers import Dense
 from aether.losses import CategoricalCrossEntropy
-from aether.optimizers import Adam
 from aether.metrics import CategoricalAccuracy
-from aether._utils.progress import TrainingProgress, make_progress, _visible_len
+from aether.model import Model
+from aether.optimizers import Adam
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 

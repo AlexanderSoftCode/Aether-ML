@@ -1,15 +1,15 @@
-import io
 import contextlib
+import io
 import unittest
+
 import numpy as np
 
 import aether.config as config
-from aether.model import Model
 from aether.layers import Dense, ReLU
 from aether.losses import CategoricalCrossEntropy, Loss
-from aether.optimizers import Adam, AdamW
 from aether.metrics import CategoricalAccuracy, RegressionAccuracy
-
+from aether.model import Model
+from aether.optimizers import Adam, AdamW
 from tests.base_case import register_test_suites
 from tests.model.base import ModelBaseTestCase
 

@@ -1,7 +1,7 @@
 import aether.config as config
 import tests.base_case as base_case
-
 from aether.layers.activations import LeakyReLU
+
 
 class TestLeakyReLU(base_case.AetherBaseLayerTestCase):
     ALPHA = 0.1

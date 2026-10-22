@@ -1,4 +1,5 @@
 from string import Template
+
 import aether.config as config
 
 BLOCK_Y = 8

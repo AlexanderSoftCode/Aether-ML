@@ -1,8 +1,11 @@
 import warnings
+from typing import Any, Optional, Sequence, Tuple, Union
+
 import numpy as np
-from typing import Sequence, Union, Tuple, Optional, Any
+
 import aether.config as config
-from ._utils import parse_inputs, resolve_dtypes, convert_single_tensor
+
+from ._utils import convert_single_tensor, parse_inputs, resolve_dtypes
 
 TENSOR_DTYPES = {'float16', 'bfloat16', 'float32', 'float64'}  # valid dtypes for ToTensor/to_tensor
 STATS_DTYPES = {'float32', 'float64'}  # valid dtypes for statistics-based transforms (StandardScaler)

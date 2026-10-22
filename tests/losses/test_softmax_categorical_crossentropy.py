@@ -1,12 +1,11 @@
 import aether.config as config
 import tests.base_case as base_case
-
+from aether.layers.activations import SoftMax
+from aether.layers.linear import Dense
 from aether.losses.categorical_crossentropy import (
     CategoricalCrossEntropy,
-    SoftmaxCategoricalCrossEntropy
+    SoftmaxCategoricalCrossEntropy,
 )
-from aether.layers.linear import Dense
-from aether.layers.activations import SoftMax
 
 
 class TestActivationSoftmaxLossCCE(base_case.AetherBaseTestCase):

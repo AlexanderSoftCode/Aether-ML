@@ -1,6 +1,8 @@
 # aether/preprocessing/_utils.py
-import numpy as np
 import warnings
+
+import numpy as np
+
 import aether.config as config
 
 TENSOR_DTYPES = {'float16', 'bfloat16', 'float32', 'float64'}  # valid dtypes for ToTensor/to_tensor

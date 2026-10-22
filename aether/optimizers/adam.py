@@ -1,8 +1,10 @@
-import numpy as np
 from functools import partial
+
+import numpy as np
 
 import aether.config as config
 from aether.custom_kernels import adam_kernel as gpu_adam
+
 
 class Optimizer:
     """Base class for all Aether ML optimizers.

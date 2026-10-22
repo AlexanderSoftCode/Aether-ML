@@ -1,5 +1,6 @@
-import numpy as np
 import aether.config as config
+
+
 class Accuracy:
     #Givers the accuracy of the prediction sand truth values
     def calculate(self, predictions, y):
