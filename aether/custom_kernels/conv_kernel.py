@@ -113,7 +113,7 @@ def get_device_multiprocessor_count():
             device = config.cp.cuda.Device()
             props = config.cp.cuda.runtime.getDeviceProperties(device.id)
             _MP_COUNT = int(props['multiProcessorCount'])
-        except Exception:
+        except config.cp.cuda.runtime.CUDARuntimeError:
             _MP_COUNT = 32
     return _MP_COUNT
 
@@ -750,7 +750,7 @@ def get_compiled_forward_conv_kernel(shape_meta: ConvShapeMeta):
     try:
         module = config.cp.RawModule(code=source, options=options)
         kernel = module.get_function('conv_forward_wmma')
-    except Exception as e:
+    except (config.cp.cuda.compiler.CompileException, config.cp.cuda.driver.CUDADriverError) as e:
         warnings.warn(
             f"[aether] conv_kernel: matrix-core conv compile failed for "
             f"shape {key}, this Conv layer will fall back to the scalar "
@@ -798,7 +798,7 @@ def get_compiled_backward_dweight_kernel(shape_meta: ConvShapeMeta):
     try:
         module = config.cp.RawModule(code=source, options=options)
         kernel = module.get_function('conv_backward_dweight_wmma')
-    except Exception as e:
+    except (config.cp.cuda.compiler.CompileException, config.cp.cuda.driver.CUDADriverError) as e:
         warnings.warn(f"[aether] conv_kernel: matrix-core dweight compile failed: {e}")
         _CONV_BACKWARD_DWEIGHT_CACHE[key] = None
         return None
@@ -840,7 +840,7 @@ def get_compiled_backward_dinput_kernel(shape_meta: ConvShapeMeta):
     try:
         module = config.cp.RawModule(code=source, options=options)
         kernel = module.get_function('conv_backward_dinput_wmma')
-    except Exception as e:
+    except (config.cp.cuda.compiler.CompileException, config.cp.cuda.driver.CUDADriverError) as e:
         warnings.warn(f"[aether] conv_kernel: matrix-core dinput compile failed: {e}")
         _CONV_BACKWARD_DINPUT_CACHE[key] = None
         return None
