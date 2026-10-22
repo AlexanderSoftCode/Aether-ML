@@ -46,24 +46,25 @@ as_strided = np.lib.stride_tricks.as_strided
 HAS_CUPY = False
 IS_HIP = False
 IS_CUDA = False
+
 try:
     import cupy as cp
-    if cp.cuda.is_available() and cp.cuda.runtime.getDeviceCount() > 0:
-        HAS_CUPY = True
-        get_array_module = cp.get_array_module
-        IS_HIP = bool(cp.cuda.runtime.is_hip)
-        IS_CUDA = not IS_HIP
-    else:
-        HAS_CUPY = False
-        cp = None
-except Exception:
+except ImportError:
+    cp = None
+
+if cp is not None and cp.cuda.is_available() and cp.cuda.runtime.getDeviceCount() > 0:
+    HAS_CUPY = True
+    get_array_module = cp.get_array_module
+    IS_HIP = bool(cp.cuda.runtime.is_hip)
+    IS_CUDA = not IS_HIP
+else:
     HAS_CUPY = False
     cp = None
 
 if not HAS_CUPY:
     def get_array_module(*args, **kwargs):
         return np
-    
+
 xp = cp if HAS_CUPY else np
 
 # Used to have bfloat16, but currently isn't stable for this framework
@@ -114,18 +115,15 @@ def set_backend(backend_name):
 
 def fuse_kernel(*fuse_args, **fuse_kwargs):
     """
-    Decorator for cp.fuse'd elementwise kernels. Binds the name to a
-    working fused callable when CuPy is available and custruction succeeds.
+    Decorator for cp.fuse'd elementwise kernels. Binds the name to a fused
+    callable when CuPy is available, else None. CuPy compiles on first call,
+    so compile errors surface there.
     """
 
     def decorator(func):
         if not HAS_CUPY:
             return None
-        try:
-            return cp.fuse(*fuse_args, **fuse_kwargs)(func)
-        except Exception as e:
-            warnings.warn(f"[aether] fuse_kernel: '{func.__name__}' failed to compile \n {e} ")
-            return None
+        return cp.fuse(*fuse_args, **fuse_kwargs)(func)
     return decorator
 
 def build_kernel(factory, name=None):
@@ -133,19 +131,17 @@ def build_kernel(factory, name=None):
     Used for kernel objects that aren't a decorated function ex.ElementwiseKernel,
     cp.ReductionKernel, cp.RawKernel. 'factory' is a zero-arg callable that performs
     the actual construction, deferred so it's never evaluated while cp is None.
-    
+    Returns None without CuPy. CuPy compiles on first launch, so compile errors
+    surface there.
+
     EX: _leaky_relu_ew = config.build_kernel(lambda: config.cp.ElementwiseKernel(
     ...),
-        '_leaky_relu_ew' 
+        '_leaky_relu_ew'
     )
     """
     if not HAS_CUPY:
         return None
-    try:
-        return factory()
-    except Exception as e:
-        warnings.warn(f"[aether] build_kernel: '{name or getattr(factory, '__name__', '?')}' failed to compile: {e}")
-        return None
+    return factory()
 
 
 def resolve_gpu_launch_geometry():
@@ -181,15 +177,11 @@ def get_tensor_core_capable():
             props = cp.cuda.runtime.getDeviceProperties(device.id)
             arch = props['gcnArchName']
             arch = arch.decode() if isinstance(arch, bytes) else arch
-            _TENSOR_CORE_CAPABLE = (
-                arch.startswith('gfx9') or
-                arch.startswith('gfx11') or
-                arch.startswith('gfx12')
-            )
+            _TENSOR_CORE_CAPABLE = arch.startswith(('gfx9', 'gfx11', 'gfx12'))
         else:
             cc = int(device.compute_capability)
             _TENSOR_CORE_CAPABLE = cc >= 70
-    except Exception as e:
+    except cp.cuda.runtime.CUDARuntimeError as e:
         warnings.warn(
             f"[aether] tensor core capability probe failed: {e}"
         )
@@ -212,7 +204,7 @@ def derive_stream_seed(base_seed, stream_id):
 
     seed_seq = np.random.SeedSequence(entropy, spawn_key=spawn_key)
     return int(seed_seq.generate_state(1, dtype=np.uint64)[0])
-    
+
 class TrainingClock:
     """
     Monotonic step counter shared by every stochastic layer in a model.
@@ -235,7 +227,7 @@ class TrainingClock:
     def reset(self, value=0):
         self.value = int(value)
 
-class DTypePolicy():
+class DTypePolicy:
 
     def __init__ (self, compute_dtype: str | None = None) -> None:
 
@@ -243,7 +235,7 @@ class DTypePolicy():
             raise TypeError(
                 f"compute_dtype must be a str or None, but got {type(compute_dtype).__name__!r}."
             )
-                            
+
         if compute_dtype is not None and compute_dtype not in COMPUTE_DTYPE:
             raise ValueError(f"dtype {compute_dtype} not in {COMPUTE_DTYPE}")
 
