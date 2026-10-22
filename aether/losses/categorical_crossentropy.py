@@ -54,11 +54,7 @@ class Loss:
     def get_config(self) -> dict:
         """Override to return constructor kwargs required to reconstruct the loss.
         Used by Model.save() / Model.load()."""
-        return {
-            "label_smoothing": (
-                float(self.label_smoothing) if self.label_smoothing is not None else None
-            ),
-        }
+        return {}
     def remember_trainable_layers(self, trainable_layers):
         self.trainable_layers = trainable_layers
 
@@ -131,6 +127,9 @@ class CategoricalCrossEntropy(Loss):
         super().__init__()
         self.label_smoothing = label_smoothing 
 
+    def get_config(self) -> dict:
+        return {"label_smoothing": float(self.label_smoothing)}
+
     def forward(self, y_pred, y_true, training = True):
         xp = config.get_array_module(y_pred)
         y_pred_fp32 = y_pred.astype(xp.float32, copy=False)
@@ -194,6 +193,8 @@ class SoftmaxCategoricalCrossEntropy(Loss):
         self.label_smoothing = label_smoothing
 
         self.backward = self._backward_fallback
+
+    get_config = CategoricalCrossEntropy.get_config
 
     def _compile_for_device(self, device):
         """Triggered by Model.to(device) to bind the fused elementwise

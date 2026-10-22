@@ -15,7 +15,7 @@ from aether.layers.conv import Conv2d
 from aether.layers.linear import Dense, Flatten
 from aether.layers.normalization import BatchNorm
 from aether.layers.pooling import MaxPool2d
-from aether.losses import CategoricalCrossEntropy, SoftmaxCategoricalCrossEntropy
+from aether.losses import CategoricalCrossEntropy, Loss, SoftmaxCategoricalCrossEntropy
 from aether.optimizers import Adam, AdamW
 from aether.metrics import Accuracy
 from aether.model import Model
@@ -364,6 +364,25 @@ class TestModelSaveBase(base_case.AetherBaseTestCase):
         self.assertIsNotNone(compile_cfg["accuracy"])
         self.assertEqual(compile_cfg["accuracy"]["class_name"], "Accuracy")
         self.assertIsInstance(compile_cfg["accuracy"]["config"], dict)
+
+    def test_save_custom_loss_without_label_smoothing(self):
+        """Regression: the Loss base get_config read label_smoothing, which only
+        the cross-entropy losses define, so any user-written loss broke save()."""
+        class MeanSquaredError(Loss):
+            def forward(self, y_pred, y_true, training=True):
+                return ((y_pred - y_true) ** 2).mean(axis=1)
+
+        model = Model()
+        model.add(Dense(self.NUM_FEATURES, 1))
+        model.configure(loss=MeanSquaredError())
+        model.finalize((self.NUM_FEATURES,))
+        model.save(self.save_path)
+
+        with zipfile.ZipFile(self.save_path, "r") as zipf:
+            manifest = json.loads(zipf.read("architecture.json").decode("utf-8"))
+        self.assertEqual(
+            manifest["compile"]["loss"], {"class_name": "MeanSquaredError", "config": {}}
+        )
 
     def test_save_partial_configuration_with_fused_loss_and_adamw(self):
         """Verify partial compilation with fused SoftmaxCategoricalCrossEntropy and AdamW serializes correctly."""
