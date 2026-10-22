@@ -20,6 +20,9 @@ class Accuracy:
     def new_pass(self):
         self.accumulated_sum = 0
         self.accumulated_count = 0
+
+    def init(self, y):
+        """Called once by Model.train() with the full training targets."""
     
     def predict(self, X, *, batch_size = None):
         prediction_steps = 1
@@ -48,9 +51,6 @@ class RegressionAccuracy(Accuracy):
             "precision": float(self.precision) if self.precision is not None else None,
         }
 class CategoricalAccuracy(Accuracy):
-    def init(self, y):
-        pass
-    
     def compare(self, predictions, y):
         xp = config.get_array_module(predictions)
 

@@ -14,6 +14,9 @@ class NullAccuracy:
     def new_pass(self):
         pass
 
+    def init(self, y):
+        pass
+
 
 class NullOptimizer:
     def step(self):
