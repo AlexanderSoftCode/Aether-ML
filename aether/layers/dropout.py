@@ -132,11 +132,12 @@ class Dropout(_DropoutBase):
 
 
 class SpatialDropout(_DropoutBase):
-    """Channel-wise dropout for NHWC feature maps.
-    
+    """Channel-wise dropout for NHWC feature maps (Tompson et al., 2015).
+
     Drops entire 2D feature channels along the trailing axis with probability
     `1 - keep_rate` instead of individual pixels. This promotes independence
-    across channels.
+    across channels. Each sample draws its own channel mask, as in Keras
+    `SpatialDropout2D` and PyTorch `Dropout2d`.
 
     Notes
     -----
@@ -161,18 +162,19 @@ class SpatialDropout(_DropoutBase):
         offset = self._clock.value
         self._active_offset = offset
 
-        # Stash the channel count so backward can rebuild the Philox mask.
+        # Stash the geometry so backward can rebuild the Philox mask.
         self.C = inputs.shape[-1]
+        self.HWC = inputs.size // inputs.shape[0]
 
         self.output = gpu_dropout.philox_spatial_dropout_forward(
-            inputs, self._seed_key, offset, self.keep_rate, self.C
+            inputs, self._seed_key, offset, self.keep_rate, self.C, self.HWC
         )  # type: ignore
         return self.output
 
     def _backward_gpu(self, dvalues):
 
         self.dinputs = gpu_dropout.philox_spatial_dropout_backward(
-            dvalues, self._seed_key, self._require_offset(), self.keep_rate, self.C
+            dvalues, self._seed_key, self._require_offset(), self.keep_rate, self.C, self.HWC
         )  # type: ignore
         return self.dinputs
 
@@ -193,7 +195,7 @@ class SpatialDropout(_DropoutBase):
         keep = dtype.type(self._inv_keep)
         drop = dtype.type(0.0)
 
-        uniform = gen.random((1, 1, 1, self.C), dtype=np.float32)
+        uniform = gen.random((inputs.shape[0], 1, 1, self.C), dtype=np.float32)
         self.channel_mask = xp.where(uniform < self.keep_rate, keep, drop)
 
         self.output = inputs * self.channel_mask
