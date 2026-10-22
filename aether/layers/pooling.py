@@ -223,7 +223,7 @@ class MaxPool2d(_PoolNd):
         Spatial dimensions of the pooling kernel as (height, width).
     stride : tuple of int, default=(2, 2)
         Stride step size along (height, width).
-    padding : {"same", "valid"}, default="same"
+    padding : {"same", "valid"}, default="valid"
         Padding mode. "same" pads the spatial borders so output dimensions scale
         proportionally by stride; "valid" applies no padding and drops boundary 
         pixels that do not fit a full window.
@@ -370,9 +370,9 @@ class AvgPool2d(_PoolNd):
         Spatial dimensions of the pooling kernel as (height, width).
     stride : tuple of int, default=(2, 2)
         Stride step size along (height, width).
-    padding : {"same", "valid"}, default="same"
+    padding : {"same", "valid"}, default="valid"
         Padding mode. "same" pads the spatial borders so output dimensions scale
-        proportionally by stride; "valid" applies no padding and drops boundaryboundary 
+        proportionally by stride; "valid" applies no padding and drops boundary
         pixels that do not fit a full window.
 
     Notes

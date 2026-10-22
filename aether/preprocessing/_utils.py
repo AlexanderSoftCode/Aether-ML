@@ -56,7 +56,7 @@ def resolve_dtypes(raw_dtype, num_arrays):
     return resolved
 
 
-def convert_single_tensor(arr, target_dtype, target_device, preserve_integers):
+def convert_single_tensor(arr, target_dtype, target_device):
     if arr is None:
         return None
     try:
@@ -65,9 +65,6 @@ def convert_single_tensor(arr, target_dtype, target_device, preserve_integers):
         tensor = np.asarray(arr)
 
     if target_dtype is None or not hasattr(tensor, 'astype'):
-        return tensor
-
-    if preserve_integers and target_dtype is None and tensor.dtype.kind in ('i', 'u'):
         return tensor
 
     return tensor.astype(target_dtype, copy=False)

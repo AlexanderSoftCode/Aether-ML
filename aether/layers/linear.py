@@ -24,13 +24,10 @@ class Dense(Layer):
     """
 
     def __init__(self, n_inputs, n_neurons, l1=(), l2=()):
+        super().__init__()
         self.n_inputs = n_inputs
         self.n_neurons= n_neurons
         self._set_regularizers(l1, l2)
-
-        self.seed = None
-        self.weights = None
-        self.biases = None
 
         self.precision_policy = config.DTypePolicy(compute_dtype = None)
 

@@ -23,7 +23,7 @@ Aether-ML is an intentionally ground-up project born knowing nothing about machi
 
 ## Key Features
 
-**Layers** — `Conv2d`, `Dense`, `BatchNorm`, `MaxPool2d`, `AvgPool2d`, `GlobalAvgPool`, `Dropout`, `SpatialDropout`, `ReLU`, `LeakyReLU`, `Softmax`, with He initialization (He et al.) and Philox counter-based PRNG for dropout masks (Salmon et al.)
+**Layers** — `Conv2d`, `Dense`, `BatchNorm`, `MaxPool2d`, `AvgPool2d`, `GlobalAvgPool`, `Dropout`, `SpatialDropout`, `ReLU`, `LeakyReLU`, `SoftMax`, with He initialization (He et al.) and Philox counter-based PRNG for dropout masks (Salmon et al.)
 
 **Kernels** — Hand-written CUDA and HIP kernels for every compute layer, magic-number integer division (Granlund & Montgomery) for on-device index decomposition, and numerical stability guards on optimizer moment denominators, standard scaling, and loss terms
 

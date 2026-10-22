@@ -88,7 +88,7 @@ def to_tensor(
         else:
             effective_dtype = dt
 
-        results.append(convert_single_tensor(temp_tensor, effective_dtype, target_device, preserve_integers))
+        results.append(convert_single_tensor(temp_tensor, effective_dtype, target_device))
     return results[0] if len(results) == 1 else tuple(results)
 
 
