@@ -1,4 +1,3 @@
-import numpy as np 
 import aether.config as config
 
 class Layer:
@@ -31,16 +30,6 @@ class Layer:
         """Override to return constructor kwargs required to reconstruct the layer. Used by Model.load()"""
         return {}
 
-    def _resolve_compute_dtype(self, xp):
-        """
-        Resolves against a live xp handle the caller already has
-        EX: `xp = config.get_array_module(inputs)` inside forward/backward
-        Layer deliberately never caches its own xp refernce
-        """
-
-        name = self.precision_policy.compute_dtype_name if self.precision_policy else 'float32'
-        return xp.dtype(name)
-    
     def _compile_for_device(self, device):
         """
         Hook for layers utilizing fused modules to 

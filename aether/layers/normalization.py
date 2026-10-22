@@ -157,8 +157,9 @@ class BatchNorm(Layer):
 
     def _forward_gpu(self, inputs, training):
         xp = config.cp
-        if not inputs.flags.c_contiguous:
-            inputs = xp.ascontiguousarray(inputs)
+        # The kernels read raw float* buffers; a precision policy can hand us
+        # fp16/fp64 from the layer before.
+        inputs = xp.ascontiguousarray(inputs, dtype=xp.float32)
 
         if not training:
             inv_std = 1.0 / xp.sqrt(self.running_var + self.epsilon)
@@ -213,7 +214,6 @@ class BatchNorm(Layer):
         self.batch_mean = batch_mean
         self.batch_var = batch_var
         self.inv_std = inv_std
-        self.normalized = (inputs - batch_mean) * inv_std
 
         output = xp.empty_like(inputs)
         gpu_bn._bn_forward_ew(inputs, batch_mean, inv_std, self.gamma, self.beta, output)
@@ -221,10 +221,7 @@ class BatchNorm(Layer):
 
     def _backward_gpu(self, dvalues):
         xp = config.cp
-        if not dvalues.flags.c_contiguous:
-            dvalues = xp.ascontiguousarray(dvalues)
-        if not self.inputs.flags.c_contiguous:
-            self.inputs = xp.ascontiguousarray(self.inputs)
+        dvalues = xp.ascontiguousarray(dvalues, dtype=xp.float32)
 
         meta = self._get_shape_meta(self.inputs.shape)
         N = meta["N"]

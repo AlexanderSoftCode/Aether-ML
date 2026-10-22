@@ -223,7 +223,7 @@ class MaxPool2d(_PoolNd):
         Spatial dimensions of the pooling kernel as (height, width).
     stride : tuple of int, default=(2, 2)
         Stride step size along (height, width).
-    padding : {"same", "valid"}, default="same"
+    padding : {"same", "valid"}, default="valid"
         Padding mode. "same" pads the spatial borders so output dimensions scale
         proportionally by stride; "valid" applies no padding and drops boundary 
         pixels that do not fit a full window.
@@ -320,6 +320,12 @@ class MaxPool2d(_PoolNd):
             )
         )
         pooled = patches.max(axis = (3, 4)) 
+        self.output = pooled
+        # Argmax routing is only needed by backward; skip it at inference.
+        if not training:
+            self.max_indices = None
+            return self.output
+
         flat_in_window = patches.reshape(S, H_out, W_out, fH * fW, C).argmax(axis=3)
         win_rows, win_cols = xp.unravel_index(flat_in_window, (fH, fW))
 
@@ -335,7 +341,6 @@ class MaxPool2d(_PoolNd):
         # Same flat-index convention as the GPU kernel: ((s*H_pad + h_in)*W_pad + w_in)*C + c
         self.max_indices = (((s_idx * H_pad + h_in) * W_pad + w_in) * C + c_idx).astype(xp.int32)
 
-        self.output = pooled
         return self.output
 
     def _backward_fallback(self, dvalues):
@@ -365,9 +370,9 @@ class AvgPool2d(_PoolNd):
         Spatial dimensions of the pooling kernel as (height, width).
     stride : tuple of int, default=(2, 2)
         Stride step size along (height, width).
-    padding : {"same", "valid"}, default="same"
+    padding : {"same", "valid"}, default="valid"
         Padding mode. "same" pads the spatial borders so output dimensions scale
-        proportionally by stride; "valid" applies no padding and drops boundaryboundary 
+        proportionally by stride; "valid" applies no padding and drops boundary
         pixels that do not fit a full window.
 
     Notes
@@ -595,6 +600,11 @@ class GlobalAvgPool(Layer):
             self.kernel_forward = gpu_pooling.get_gap_forward_kernel(variant)
             self.kernel_backward = gpu_pooling.get_gap_backward_kernel(variant)
 
+            if self.kernel_forward is None or self.kernel_backward is None:
+                self.forward = self._forward_fallback
+                self.backward = self._backward_fallback
+                return
+
             self._variant = variant
             self._target_threads = target_threads
             self.forward = self._forward_gpu
@@ -605,11 +615,13 @@ class GlobalAvgPool(Layer):
 
     def _forward_gpu(self, inputs, training):
         xp = config.cp
+        # The kernel indexes a dense NHWC float* buffer.
+        inputs = xp.ascontiguousarray(inputs, dtype=xp.float32)
         self.inputs_shape = inputs.shape
         meta = self._get_shape_meta(self.inputs_shape)
 
         # Allocate device array matching (S, C) output shape
-        self.output = xp.empty(meta["out_shape"], dtype=inputs.dtype)
+        self.output = xp.empty(meta["out_shape"], dtype=xp.float32)
         kernel_args = (inputs, self.output) + meta["static_args"]
         
         self.kernel_forward(meta["grid_dim"], meta["block_dim"], kernel_args)
@@ -618,8 +630,9 @@ class GlobalAvgPool(Layer):
     def _backward_gpu(self, dvalues):
         xp = config.cp
         meta = self._get_shape_meta(self.inputs_shape)
-        
-        self.dinputs = xp.empty(self.inputs_shape, dtype=dvalues.dtype)
+        dvalues = xp.ascontiguousarray(dvalues, dtype=xp.float32)
+
+        self.dinputs = xp.empty(self.inputs_shape, dtype=xp.float32)
         kernel_args = (dvalues, self.dinputs) + meta["static_args"]
     
         self.kernel_backward(meta["grid_dim"], meta["block_dim"], kernel_args)

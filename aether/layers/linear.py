@@ -24,13 +24,10 @@ class Dense(Layer):
     """
 
     def __init__(self, n_inputs, n_neurons, l1=(), l2=()):
+        super().__init__()
         self.n_inputs = n_inputs
         self.n_neurons= n_neurons
         self._set_regularizers(l1, l2)
-
-        self.seed = None
-        self.weights = None
-        self.biases = None
 
         self.precision_policy = config.DTypePolicy(compute_dtype = None)
 
@@ -134,6 +131,8 @@ class Dense(Layer):
         inputs_c = self._inputs_compute
         weights_c = self._weights_compute
 
+        # Deliberately uncast dvalues: parameter gradients accumulate at the
+        # incoming (usually fp32) precision, not the compute dtype.
         dweights = xp.dot(inputs_c.T, dvalues)
         dbiases = xp.sum(dvalues, axis = 0, keepdims = True)
         dinputs_c = xp.dot(dvalues_c, weights_c.T)

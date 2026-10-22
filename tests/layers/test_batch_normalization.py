@@ -247,6 +247,36 @@ class TestBatchNormLayer(base_case.AetherBaseLayerTestCase):
             self.assertTrue(self.xp.allclose(layer.dweights, dweights_fallback, atol=1e-4, rtol=1e-4))
             self.assertTrue(self.xp.allclose(layer.dbiases, dbiases_fallback, atol=1e-4, rtol=1e-4))
 
+    def test_gpu_non_float32_inputs_match_float32(self):
+        """Regression: under set_precision() a Dense before BatchNorm emits fp16/fp64,
+        which the float* reduction kernels misread and the fp32-only elementwise
+        kernel rejected (TypeError) after running_mean was already corrupted."""
+        if self.backend_name != "cupy":
+            self.skipTest("GPU dtype test is only applicable on CuPy backend.")
+
+        dvalues = self.xp.random.randn(*self.DENSE_SHAPE).astype(self.xp.float32)
+        for dtype in (self.xp.float16, self.xp.float64):
+            with self.subTest(dtype=dtype.__name__):
+                inputs = self.dense_inputs.astype(dtype)
+                reference = inputs.astype(self.xp.float32)
+
+                layer = self.layer_dense
+                expected_out = layer._forward_fallback(reference, training=True)
+                expected_dinputs = layer._backward_fallback(dvalues)
+                layer.running_mean = self.xp.zeros(self.NUM_FEATURES_DENSE, dtype=self.xp.float32)
+                layer.running_var = self.xp.ones(self.NUM_FEATURES_DENSE, dtype=self.xp.float32)
+                expected_running_mean = 0.1 * self.xp.mean(reference, axis=0)
+
+                out = layer._forward_gpu(inputs, training=True)
+                dinputs = layer._backward_gpu(dvalues.astype(dtype))
+
+                self.assertTrue(self.xp.allclose(out, expected_out, atol=1e-4, rtol=1e-4))
+                self.assertTrue(self.xp.allclose(dinputs, expected_dinputs, atol=1e-3, rtol=1e-3))
+                self.assertTrue(self.xp.allclose(
+                    layer.running_mean, expected_running_mean, atol=1e-4, rtol=1e-4
+                ))
+                layer._forward_gpu(inputs, training=False)
+
     def test_gpu_numerical_stability_large_offset(self):
         """Verify variance stability under large baseline offsets and low variance."""
         if self.backend_name != "cupy":

@@ -131,6 +131,33 @@ class TestSpatialDropout(base_case.AetherBaseLayerTestCase):
 
         self.assertFalse(bool(self.xp.all(first == second)))
 
+    # ---- per-sample masks ---------------------------------------------
+
+    def _channel_masks(self, shape=(8, 4, 4, 64)):
+        layer = self.make_built_layer(
+            SpatialDropout, input_shape=shape[1:], seed=self.FIXED_SEED, rate=self.DEFAULT_RATE
+        )
+        output = layer.forward(self.xp.ones(shape, dtype=self.xp.float32), training=True)
+        return output != 0
+
+    def test_samples_draw_independent_channel_masks(self):
+        """Regression: one (1, 1, 1, C) mask was once shared by the whole batch."""
+        kept = self._channel_masks()[:, 0, 0, :]
+        self.assertFalse(bool(self.xp.all(kept == kept[0])))
+
+    def test_mask_is_constant_over_each_feature_map(self):
+        """Within one sample, a channel is kept or dropped as a whole."""
+        kept = self._channel_masks()
+        self.assertTrue(bool(self.xp.all(kept == kept[:, :1, :1, :])))
+
+    def test_backward_matches_forward_mask_per_sample(self):
+        layer = self.make_built_layer(
+            SpatialDropout, input_shape=(3, 3, 16), seed=self.FIXED_SEED, rate=self.DEFAULT_RATE
+        )
+        inputs = self.xp.ones((6, 3, 3, 16), dtype=self.xp.float32)
+        forward_out = layer.forward(inputs, training=True)
+        dinputs = layer.backward(self.xp.ones_like(inputs))
+        self.assertTrue(bool(self.xp.allclose(forward_out, dinputs)))
 
     # ---- clock / offset bookkeeping -----------------------------------
 

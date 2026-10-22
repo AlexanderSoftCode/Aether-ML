@@ -54,6 +54,59 @@ class TestGlobalAvgPool(base_case.AetherBaseLayerTestCase):
             atol=1e-5
         )
 
+    def _gpu_layer(self, input_shape):
+        if self.backend_name != 'cupy' or not config.HAS_CUPY:
+            self.skipTest("Applies only to CuPy pass")
+        layer = self.make_built_layer(GlobalAvgPool, input_shape=input_shape)
+        layer._compile_for_device("cupy")
+        return layer
+
+    def test_forward_gpu_non_contiguous_and_non_float32_inputs(self):
+        """Regression: the RawKernel read any buffer as dense NHWC float*."""
+        base = self.xp.random.randn(4, 6, 5, 16).astype(self.xp.float32)
+        cases = {
+            "channel-strided view": base[..., ::2],
+            "sample/height swapped view": base.transpose(1, 0, 2, 3),
+            "float16": base.astype(self.xp.float16),
+            "float64": base.astype(self.xp.float64),
+        }
+        for name, x in cases.items():
+            with self.subTest(case=name):
+                layer = self._gpu_layer(x.shape[1:])
+                out = layer.forward(x, training=True)
+                expected = x.astype(self.xp.float32).mean(axis=(1, 2))
+                self.xp.testing.assert_allclose(out, expected, rtol=1e-5, atol=1e-3)
+
+                dvalues = self.xp.ones_like(out)[:, ::-1]
+                dinputs = layer.backward(dvalues)
+                self.xp.testing.assert_allclose(
+                    dinputs, self.xp.full(x.shape, 1.0 / (x.shape[1] * x.shape[2])), rtol=1e-5
+                )
+
+    def test_forward_gpu_after_conv_fallback(self):
+        """Conv2d's fallback einsum output is not C-contiguous; feed it straight in."""
+        from aether.layers.conv import Conv2d
+        layer = self._gpu_layer((8, 8, 8))
+        conv = self.make_built_layer(Conv2d, input_shape=(8, 8, 3), in_channels=3, out_channels=8)
+        x = conv._forward_fallback(
+            self.xp.random.randn(4, 8, 8, 3).astype(self.xp.float32), training=False
+        )
+        self.xp.testing.assert_allclose(
+            layer.forward(x, training=False), x.mean(axis=(1, 2)), rtol=1e-5, atol=1e-5
+        )
+
+    def test_failed_kernel_compile_binds_fallback(self):
+        """A kernel that failed to compile used to surface as 'NoneType' is not callable."""
+        if self.backend_name != 'cupy' or not config.HAS_CUPY:
+            self.skipTest("Applies only to CuPy pass")
+        from unittest import mock
+        from aether.custom_kernels import pooling_kernel
+        layer = self.make_built_layer(GlobalAvgPool, input_shape=(self.H, self.W, self.C))
+        with mock.patch.object(pooling_kernel, "get_gap_forward_kernel", return_value=None):
+            layer._compile_for_device("cupy")
+        self.assertIs(layer.forward.__func__, GlobalAvgPool._forward_fallback)
+        self.assertIs(layer.backward.__func__, GlobalAvgPool._backward_fallback)
+
     def test_forward_known_values(self):
         """Verify mathematical output with uniform constant inputs."""
         constant_val = 5.5

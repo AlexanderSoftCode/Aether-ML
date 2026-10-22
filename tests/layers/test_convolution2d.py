@@ -312,7 +312,7 @@ class TestConvLayer(base_case.AetherBaseLayerTestCase):
         dvalues = self.xp.ones((2, 8, 8, 2))             # ones so sum(output) is the scalar loss
     
         # Analytical gradient
-        layer.forward(fixed_input, training=False)
+        layer.forward(fixed_input, training=True)
         layer.backward(dvalues)
         analytical_dweights = layer.dweights.copy()
     
@@ -405,7 +405,7 @@ class TestConvLayer(base_case.AetherBaseLayerTestCase):
         )
 
     def _run_dweight_kernel_parity(self, S, spatial, in_channels, out_channels,
-                                   stride=None, padding=None):
+                                   stride=None, padding=None, filter_size=None):
         """Drive the fused dweight kernel once and check both of its outputs.
 
         conv_backward_dweight_wmma emits dweights AND dbiases from a single
@@ -421,6 +421,7 @@ class TestConvLayer(base_case.AetherBaseLayerTestCase):
 
         stride = stride or self.STRIDE
         padding = padding or self.PADDING
+        filter_size = filter_size or self.FILTER_SIZE
         H, W = spatial
 
         layer = self.make_built_layer(
@@ -428,7 +429,7 @@ class TestConvLayer(base_case.AetherBaseLayerTestCase):
             input_shape=(H, W, in_channels),
             in_channels=in_channels,
             out_channels=out_channels,
-            filter_size=self.FILTER_SIZE,
+            filter_size=filter_size,
             stride=stride,
             padding=padding,
         )
@@ -439,12 +440,12 @@ class TestConvLayer(base_case.AetherBaseLayerTestCase):
             S, meta.H_out, meta.W_out, out_channels
         ).astype(self.xp.float32)
 
-        layer._forward_fallback(fixed_input, training=False)
+        layer._forward_fallback(fixed_input, training=True)
         layer._backward_fallback(dvalues)
         fallback_dweights = layer.dweights.copy()
         fallback_dbiases = layer.dbiases.copy()
 
-        layer._forward_gpu(fixed_input, training=False)
+        layer._forward_gpu(fixed_input, training=True)
         layer._backward_gpu(dvalues)
         gpu_dweights = layer.dweights.copy()
         gpu_dbiases = layer.dbiases.copy()
@@ -515,11 +516,11 @@ class TestConvLayer(base_case.AetherBaseLayerTestCase):
             S, meta.H_out, meta.W_out, out_channels
         ).astype(self.xp.float32)
 
-        layer._forward_fallback(fixed_input, training=False)
+        layer._forward_fallback(fixed_input, training=True)
         layer._backward_fallback(dvalues)
         fallback_dinputs = layer.dinputs.copy()
 
-        layer._forward_gpu(fixed_input, training=False)
+        layer._forward_gpu(fixed_input, training=True)
         layer._backward_gpu(dvalues)
         gpu_dinputs = layer.dinputs.copy()
 
@@ -607,10 +608,10 @@ class TestConvLayer(base_case.AetherBaseLayerTestCase):
             S, meta.H_out, meta.W_out, C_out
         ).astype(self.xp.float32)
 
-        gpu_layer.forward(inputs, training=False)
+        gpu_layer.forward(inputs, training=True)
         gpu_dinputs = gpu_layer.backward(dvalues)
 
-        throwaway_layer.forward(inputs, training=False)
+        throwaway_layer.forward(inputs, training=True)
         fallback_dinputs = throwaway_layer.backward(dvalues)
 
         self.assertEqual(gpu_dinputs.shape, (S, H, W, C_in))
@@ -688,14 +689,14 @@ class TestConvLayer(base_case.AetherBaseLayerTestCase):
         )
         truth = self.xp.asarray(truth)
 
-        layer._forward_fallback(inputs, training=False)
+        layer._forward_fallback(inputs, training=True)
         layer._backward_fallback(dvalues)
         self._assert_gemm_close(layer.dinputs, truth, "dinputs (fallback vs truth)",
                                 tol=1e-5)
 
         from aether.custom_kernels import conv_kernel
         if self.backend_name == 'cupy' and conv_kernel.get_is_conv_gpu_available():
-            layer._forward_gpu(inputs, training=False)
+            layer._forward_gpu(inputs, training=True)
             layer._backward_gpu(dvalues)
             self._assert_gemm_close(layer.dinputs, truth, "dinputs (gpu vs truth)")
 
@@ -731,6 +732,133 @@ class TestConvLayer(base_case.AetherBaseLayerTestCase):
             S=2, spatial=(16, 16), in_channels=4, out_channels=8,
             stride=(2, 1), padding="valid",
         )
+
+    # ---- 'same' padding geometry (even filters pad asymmetrically) ----------
+
+    SAME_CASES = [
+        # (spatial, filter_size, stride)
+        ((8, 8), (2, 2), (1, 1)),
+        ((8, 8), (4, 4), (2, 2)),
+        ((9, 7), (2, 4), (2, 1)),
+        ((8, 8), (3, 3), (2, 2)),
+        ((7, 7), (3, 3), (2, 2)),
+        ((8, 8), (1, 1), (3, 3)),
+    ]
+
+    def _make_same_layer(self, spatial, filter_size, stride, in_channels=2, out_channels=3):
+        return self.make_built_layer(
+            Conv2d, input_shape=(*spatial, in_channels), seed=self.SEED,
+            in_channels=in_channels, out_channels=out_channels,
+            filter_size=filter_size, stride=stride, padding="same",
+        )
+
+    def test_same_padding_build_matches_forward_shape(self):
+        """Regression: build() and forward() once derived 'same' geometry separately
+        and disagreed for even filters (8x8, 2x2 -> build 8x8, forward 7x7)."""
+        for spatial, filter_size, stride in self.SAME_CASES:
+            with self.subTest(spatial=spatial, filter_size=filter_size, stride=stride):
+                layer = self._make_same_layer(spatial, filter_size, stride)
+                out = layer.forward(
+                    self.xp.zeros((2, *spatial, 2), dtype=self.xp.float32), training=False
+                )
+                expected = tuple(-(-n // s) for n, s in zip(spatial, stride))
+                self.assertEqual(layer.output_shape, (*expected, 3))
+                self.assertEqual(out.shape[1:], layer.output_shape)
+
+    def test_same_padding_forward_ground_truth(self):
+        """Forward against the definition, with TF's pad_top = pad_total // 2."""
+        for spatial, filter_size, stride in self.SAME_CASES:
+            with self.subTest(spatial=spatial, filter_size=filter_size, stride=stride):
+                layer = self._make_same_layer(spatial, filter_size, stride)
+                x = self.xp.random.randn(2, *spatial, 2).astype(self.xp.float32)
+                out = self._to_numpy(layer._forward_fallback(x, training=False))
+
+                xn, w = self._to_numpy(x), self._to_numpy(layer.filter_weights)
+                (H, W), (fH, fW), (sH, sW) = spatial, filter_size, stride
+                H_out, W_out = out.shape[1:3]
+                pad_h = max((H_out - 1) * sH + fH - H, 0) // 2
+                pad_w = max((W_out - 1) * sW + fW - W, 0) // 2
+                padded = np.pad(xn, ((0, 0), (pad_h, fH), (pad_w, fW), (0, 0)))
+                truth = np.zeros_like(out)
+                for h in range(H_out):
+                    for v in range(W_out):
+                        patch = padded[:, h * sH:h * sH + fH, v * sW:v * sW + fW, :]
+                        truth[:, h, v, :] = np.tensordot(patch, w, axes=([1, 2, 3], [0, 1, 2]))
+                np.testing.assert_allclose(out, truth, rtol=1e-5, atol=1e-5)
+
+    def test_same_padding_even_filter_numerical_gradient(self):
+        """Fallback dweights match finite differences on an even, strided filter."""
+        layer = self._make_same_layer((7, 7), (2, 2), (2, 2), in_channels=1, out_channels=2)
+        x = self.xp.random.randn(2, 7, 7, 1)
+        layer.forward(x, training=True)
+        layer.backward(self.xp.ones_like(layer.output))
+        analytical = self._to_numpy(layer.dweights)
+
+        eps = 1e-2
+        numerical = np.zeros_like(analytical)
+        for idx in np.ndindex(*analytical.shape):
+            layer.filter_weights[idx] += eps
+            layer.invalidate_shadow_caches()
+            plus = float(self.xp.sum(layer.forward(x, training=False)))
+            layer.filter_weights[idx] -= 2 * eps
+            layer.invalidate_shadow_caches()
+            minus = float(self.xp.sum(layer.forward(x, training=False)))
+            layer.filter_weights[idx] += eps
+            layer.invalidate_shadow_caches()
+            numerical[idx] = (plus - minus) / (2 * eps)
+        np.testing.assert_allclose(analytical, numerical, rtol=3e-2, atol=2e-2)
+
+    def test_conv_dinput_ground_truth_even_filter(self):
+        """Even filter, stride 1: the extra pad pixel sits on the bottom/right."""
+        self._run_dinput_ground_truth(
+            S=2, spatial=(8, 8), in_channels=4, out_channels=8,
+            stride=(1, 1), padding="same", filter_size=(2, 2),
+        )
+
+    def test_conv_dinput_ground_truth_even_filter_strided(self):
+        """Even filter, stride 2 on an odd input."""
+        self._run_dinput_ground_truth(
+            S=2, spatial=(9, 9), in_channels=4, out_channels=8,
+            stride=(2, 2), padding="same", filter_size=(4, 4),
+        )
+
+    def test_conv_gpu_even_filter_forward_parity(self):
+        """GPU forward reads the asymmetric pad off ConvShapeMeta like the fallback."""
+        if self.backend_name != 'cupy':
+            self.skipTest("CuPy backend required for GPU kernel tests")
+        from aether.custom_kernels import conv_kernel
+        if not conv_kernel.get_is_conv_gpu_available():
+            self.skipTest("Matrix-core GPU kernels not available on this device")
+        for spatial, filter_size, stride in self.SAME_CASES:
+            with self.subTest(spatial=spatial, filter_size=filter_size, stride=stride):
+                layer = self._make_same_layer(spatial, filter_size, stride)
+                x = self.xp.random.randn(2, *spatial, 2).astype(self.xp.float32)
+                self._assert_gemm_close(
+                    layer._forward_gpu(x, training=False),
+                    layer._forward_fallback(x, training=False), "forward", tol=1e-2,
+                )
+
+    def test_conv_gpu_even_filter_dweight_parity(self):
+        self._run_dweight_kernel_parity(
+            S=2, spatial=(9, 9), in_channels=4, out_channels=8,
+            stride=(2, 2), padding="same", filter_size=(4, 4),
+        )
+
+    def test_conv_gpu_even_filter_dinput_parity(self):
+        self._run_dinput_kernel_parity(
+            S=2, spatial=(8, 8), in_channels=4, out_channels=8,
+            stride=(1, 1), padding="same", filter_size=(2, 2),
+        )
+
+    def test_inference_forward_drops_backward_caches(self):
+        """Inference keeps no activation-sized caches, and backward then refuses."""
+        self.layer.forward(self.test_images, training=True)
+        self.assertIsNotNone(self.layer.inputs)
+        self.layer.forward(self.test_images, training=False)
+        self.assertIsNone(self.layer.inputs)
+        self.assertIsNone(getattr(self.layer, "padded_inputs", None))
+        with self.assertRaises(RuntimeError):
+            self.layer.backward(self.xp.ones((2, 28, 28, self.OUT_CHANNELS)))
 
     # ---- precision policy ------------------------------------
 

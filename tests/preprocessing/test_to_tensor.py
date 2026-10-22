@@ -70,19 +70,14 @@ class TestToTensorTransform(base_case.AetherBaseTestCase):
         with self.assertRaises(ValueError):
             resolve_dtypes(('float32', 'float16'), 3)
 
-    def test_convert_single_tensor_updated_integer_preservation(self):
-        """Verify convert_single_tensor properly handles integer bypass logic."""
+    def test_convert_single_tensor_casts_only_with_a_target_dtype(self):
+        """Integer preservation is decided by to_tensor; this only casts or passes through."""
         arr = np.array([1, 2, 3], dtype=np.uint8)
 
-        # When target_dtype is None and preserve_integers=True -> keep integer dtype
-        res_kept = convert_single_tensor(
-            arr, target_dtype=None, target_device=self.backend_name, preserve_integers=True
-        )
+        res_kept = convert_single_tensor(arr, target_dtype=None, target_device=self.backend_name)
         self.assertTrue(self.xp.issubdtype(res_kept.dtype, self.xp.integer))
 
-        res_casted = convert_single_tensor(
-            arr, target_dtype='float32', target_device=self.backend_name, preserve_integers=True
-        )
+        res_casted = convert_single_tensor(arr, target_dtype='float32', target_device=self.backend_name)
         self.assertEqual(str(res_casted.dtype), 'float32')
 
     # ---- Functional API Tests (to_tensor) -----------------------------

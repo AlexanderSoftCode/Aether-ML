@@ -290,5 +290,14 @@ class TestMaxPool2d(base_case.AetherBaseLayerTestCase):
             analytical_dinputs, numerical_dinputs, decimal=3
         )
 
+    def test_fallback_inference_skips_argmax_routing(self):
+        """max_indices is backward-only; inference must not compute or keep it."""
+        x = self.xp.random.randn(2, 8, 8, 3).astype(self.xp.float32)
+        self.layer._forward_fallback(x, training=True)
+        self.assertIsNotNone(self.layer.max_indices)
+        out = self.layer._forward_fallback(x, training=False)
+        self.assertIsNone(self.layer.max_indices)
+        self.assertEqual(out.shape, (2, 4, 4, 3))
+
 
 base_case.register_test_suites(globals(), TestMaxPool2d)

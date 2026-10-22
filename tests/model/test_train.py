@@ -6,12 +6,20 @@ import numpy as np
 import aether.config as config
 from aether.model import Model
 from aether.layers import Dense, ReLU
-from aether.losses import CategoricalCrossEntropy
+from aether.losses import CategoricalCrossEntropy, Loss
 from aether.optimizers import Adam, AdamW
-from aether.metrics import CategoricalAccuracy
+from aether.metrics import CategoricalAccuracy, RegressionAccuracy
 
 from tests.base_case import register_test_suites
 from tests.model.base import ModelBaseTestCase
+
+
+class _MeanSquaredError(Loss):
+    def forward(self, y_pred, y_true, training=True):
+        return ((y_pred - y_true) ** 2).mean(axis=1)
+
+    def backward(self, y_pred, y_true):
+        self.dinputs = 2 * (y_pred - y_true) / y_pred.size
 
 
 class TestModelTrainBase(ModelBaseTestCase):
@@ -48,6 +56,18 @@ class TestModelTrainBase(ModelBaseTestCase):
             self.xp.allclose(initial_weights, trainable_layer.weights),
             "Expected weights to update after a training step."
         )
+
+    def test_train_initializes_default_regression_accuracy(self):
+        """Regression: precision=None reached compare() as `x < None`."""
+        model = Model()
+        model.to(self.backend_name)
+        model.add(Dense(n_inputs=self.NUM_FEATURES, n_neurons=1))
+        model.configure(loss=_MeanSquaredError(), optimizer=AdamW(), accuracy=RegressionAccuracy())
+        model.finalize(input_shape=(self.NUM_FEATURES,))
+        y = self.X[:, :1]
+
+        model.train(self.X, y, epochs=1, verbose=False)
+        self.assertAlmostEqual(float(model.accuracy.precision), float(self.xp.std(y)) / 250, places=6)
 
     def test_train_mini_batch_multiple_epochs(self):
         self.model.finalize(input_shape=(self.NUM_FEATURES,))

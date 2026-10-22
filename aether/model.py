@@ -752,6 +752,7 @@ class Model():
         # A pipeline accepts X and y on different devices; shuffled batches index
         # both with one array drawn in X's namespace, so align y to it once.
         y = config.to_device(y, target="cupy" if xp.__name__ == "cupy" else "numpy")
+        self.accuracy.init(y)
 
         num_samples = len(X)
         batch_slices = self._batch_slices(num_samples, batch_size)
