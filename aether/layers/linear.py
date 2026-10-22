@@ -134,6 +134,8 @@ class Dense(Layer):
         inputs_c = self._inputs_compute
         weights_c = self._weights_compute
 
+        # Deliberately uncast dvalues: parameter gradients accumulate at the
+        # incoming (usually fp32) precision, not the compute dtype.
         dweights = xp.dot(inputs_c.T, dvalues)
         dbiases = xp.sum(dvalues, axis = 0, keepdims = True)
         dinputs_c = xp.dot(dvalues_c, weights_c.T)

@@ -295,7 +295,7 @@ class BaseTestOptimizerAdam(base_case.AetherBaseLayerTestCase):
         dvalues = self.xp.ones((2, 8, 8, 2), dtype=self.xp.float32)
 
         # Populate the layer's shadow cache on forward
-        out_before = layer.forward(fixed_input, training=False).copy()
+        out_before = layer.forward(fixed_input, training=True).copy()
         layer.backward(dvalues)
 
         weights_before = layer.weights.copy()

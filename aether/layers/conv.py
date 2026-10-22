@@ -236,10 +236,19 @@ class Conv2d(Layer):
 
         plan(inputs_fp16, self._fp16_weight_cache, self.biases, self.output)
 
-        self.inputs = inputs
+        self.inputs = inputs if training else None
         return self.output
 
+    def _require_forward_cache(self):
+        if getattr(self, "inputs", None) is None:
+            raise RuntimeError(
+                "Conv2d.backward() called without a preceding training=True forward "
+                "pass. If you are manually tracing through the layers, please "
+                "add training=True to Conv2d.forward()"
+            )
+
     def _backward_gpu(self, dvalues):
+        self._require_forward_cache()
         xp = config.cp
         S, H_in, W_in, C_in = self.inputs.shape
         fH, fW = self.filter_size
@@ -315,13 +324,14 @@ class Conv2d(Layer):
         self.output = xp.einsum('shwxyc,xycd->shwd', patches, self.filter_weights, optimize=True)
         self.output += self.biases.reshape((1, 1, 1, self.C_out)) 
 
-        self.inputs = inputs
-        self.padded_inputs = padded_inputs
+        # Backward-only caches; dropping them at inference frees an activation.
+        self.inputs = inputs if training else None
+        self.padded_inputs = padded_inputs if training else None
         return self.output
 
     
     def _backward_fallback(self, dvalues):
-
+        self._require_forward_cache()
         xp = config.get_array_module(dvalues)
         as_strided = config.get_stride_utility(xp)
 

@@ -320,6 +320,12 @@ class MaxPool2d(_PoolNd):
             )
         )
         pooled = patches.max(axis = (3, 4)) 
+        self.output = pooled
+        # Argmax routing is only needed by backward; skip it at inference.
+        if not training:
+            self.max_indices = None
+            return self.output
+
         flat_in_window = patches.reshape(S, H_out, W_out, fH * fW, C).argmax(axis=3)
         win_rows, win_cols = xp.unravel_index(flat_in_window, (fH, fW))
 
@@ -335,7 +341,6 @@ class MaxPool2d(_PoolNd):
         # Same flat-index convention as the GPU kernel: ((s*H_pad + h_in)*W_pad + w_in)*C + c
         self.max_indices = (((s_idx * H_pad + h_in) * W_pad + w_in) * C + c_idx).astype(xp.int32)
 
-        self.output = pooled
         return self.output
 
     def _backward_fallback(self, dvalues):

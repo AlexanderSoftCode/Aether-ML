@@ -312,7 +312,7 @@ class TestConvLayer(base_case.AetherBaseLayerTestCase):
         dvalues = self.xp.ones((2, 8, 8, 2))             # ones so sum(output) is the scalar loss
     
         # Analytical gradient
-        layer.forward(fixed_input, training=False)
+        layer.forward(fixed_input, training=True)
         layer.backward(dvalues)
         analytical_dweights = layer.dweights.copy()
     
@@ -440,12 +440,12 @@ class TestConvLayer(base_case.AetherBaseLayerTestCase):
             S, meta.H_out, meta.W_out, out_channels
         ).astype(self.xp.float32)
 
-        layer._forward_fallback(fixed_input, training=False)
+        layer._forward_fallback(fixed_input, training=True)
         layer._backward_fallback(dvalues)
         fallback_dweights = layer.dweights.copy()
         fallback_dbiases = layer.dbiases.copy()
 
-        layer._forward_gpu(fixed_input, training=False)
+        layer._forward_gpu(fixed_input, training=True)
         layer._backward_gpu(dvalues)
         gpu_dweights = layer.dweights.copy()
         gpu_dbiases = layer.dbiases.copy()
@@ -516,11 +516,11 @@ class TestConvLayer(base_case.AetherBaseLayerTestCase):
             S, meta.H_out, meta.W_out, out_channels
         ).astype(self.xp.float32)
 
-        layer._forward_fallback(fixed_input, training=False)
+        layer._forward_fallback(fixed_input, training=True)
         layer._backward_fallback(dvalues)
         fallback_dinputs = layer.dinputs.copy()
 
-        layer._forward_gpu(fixed_input, training=False)
+        layer._forward_gpu(fixed_input, training=True)
         layer._backward_gpu(dvalues)
         gpu_dinputs = layer.dinputs.copy()
 
@@ -608,10 +608,10 @@ class TestConvLayer(base_case.AetherBaseLayerTestCase):
             S, meta.H_out, meta.W_out, C_out
         ).astype(self.xp.float32)
 
-        gpu_layer.forward(inputs, training=False)
+        gpu_layer.forward(inputs, training=True)
         gpu_dinputs = gpu_layer.backward(dvalues)
 
-        throwaway_layer.forward(inputs, training=False)
+        throwaway_layer.forward(inputs, training=True)
         fallback_dinputs = throwaway_layer.backward(dvalues)
 
         self.assertEqual(gpu_dinputs.shape, (S, H, W, C_in))
@@ -689,14 +689,14 @@ class TestConvLayer(base_case.AetherBaseLayerTestCase):
         )
         truth = self.xp.asarray(truth)
 
-        layer._forward_fallback(inputs, training=False)
+        layer._forward_fallback(inputs, training=True)
         layer._backward_fallback(dvalues)
         self._assert_gemm_close(layer.dinputs, truth, "dinputs (fallback vs truth)",
                                 tol=1e-5)
 
         from aether.custom_kernels import conv_kernel
         if self.backend_name == 'cupy' and conv_kernel.get_is_conv_gpu_available():
-            layer._forward_gpu(inputs, training=False)
+            layer._forward_gpu(inputs, training=True)
             layer._backward_gpu(dvalues)
             self._assert_gemm_close(layer.dinputs, truth, "dinputs (gpu vs truth)")
 
@@ -849,6 +849,16 @@ class TestConvLayer(base_case.AetherBaseLayerTestCase):
             S=2, spatial=(8, 8), in_channels=4, out_channels=8,
             stride=(1, 1), padding="same", filter_size=(2, 2),
         )
+
+    def test_inference_forward_drops_backward_caches(self):
+        """Inference keeps no activation-sized caches, and backward then refuses."""
+        self.layer.forward(self.test_images, training=True)
+        self.assertIsNotNone(self.layer.inputs)
+        self.layer.forward(self.test_images, training=False)
+        self.assertIsNone(self.layer.inputs)
+        self.assertIsNone(getattr(self.layer, "padded_inputs", None))
+        with self.assertRaises(RuntimeError):
+            self.layer.backward(self.xp.ones((2, 28, 28, self.OUT_CHANNELS)))
 
     # ---- precision policy ------------------------------------
 
