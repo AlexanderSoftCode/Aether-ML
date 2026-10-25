@@ -975,5 +975,20 @@ class TestConvLayer(base_case.AetherBaseLayerTestCase):
         # Assert dinputs has the input shape
         self.assertEqual(dinputs.shape, inputs.shape)
 
+    def test_backward_without_input_grad_keeps_parameter_grads(self):
+        """needs_input_grad=False drops dX only; dW/dB must match a normal backward."""
+        output = self.layer.forward(self.test_images, training=True)
+        dvalues = self.xp.random.randn(*output.shape).astype(self.xp.float32)
+
+        self.assertIsNotNone(self.layer.backward(dvalues))
+        expected_dw, expected_db = self.layer.dweights.copy(), self.layer.dbiases.copy()
+
+        self.layer.needs_input_grad = False
+        self.assertIsNone(self.layer.backward(dvalues))
+        self.assertIsNone(self.layer.dinputs)
+        # GPU dW accumulates split-K slices with atomics, so summation order varies run to run.
+        self.xp.testing.assert_allclose(self.layer.dweights, expected_dw, rtol=1e-5)
+        self.xp.testing.assert_allclose(self.layer.dbiases, expected_db, rtol=1e-5)
+
 
 base_case.register_test_suites(globals(), TestConvLayer)

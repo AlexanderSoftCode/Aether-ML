@@ -1,17 +1,17 @@
-import aether.config as config
-
 
 class Layer:
     """Abstract base class defining shape-inference, parameter routing, and
     state manager for all network layers."""
     _precision_exempt: bool = False
     is_stochastic: bool = False
+    # Model.finalize() clears this on the first trainable layer: nothing consumes its dX.
+    needs_input_grad: bool = True
     def __init__(self):
         self.seed = None
         # these attributes below will likely be used for Model.save()
         self.input_shape = None
         self.output_shape = None
-        self.weights = None 
+        self.weights = None
         self.biases = None
         self.precision_policy = None
 
@@ -26,17 +26,16 @@ class Layer:
         self.output_shape = input_shape
 
         return self.output_shape
-    
+
     def get_config(self) -> dict:
         """Override to return constructor kwargs required to reconstruct the layer. Used by Model.load()"""
         return {}
 
     def _compile_for_device(self, device):
         """
-        Hook for layers utilizing fused modules to 
+        Hook for layers utilizing fused modules to
         re-bind runtime pointers
         """
-        pass
 
     def get_parameters(self) -> dict[str, object]:
         """Returns a dict of state tensors belonging to this layer."""
@@ -72,4 +71,3 @@ class Layer:
         """Helper for trainable layers to bind attributes required by Loss and Adam."""
         self.weight_regularizer_l1, self.bias_regularizer_l1 = self._parse_reg(l1)
         self.weight_regularizer_l2, self.bias_regularizer_l2 = self._parse_reg(l2)
-        

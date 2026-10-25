@@ -136,10 +136,13 @@ class Dense(Layer):
         # incoming (usually fp32) precision, not the compute dtype.
         dweights = xp.dot(inputs_c.T, dvalues)
         dbiases = xp.sum(dvalues, axis = 0, keepdims = True)
-        dinputs_c = xp.dot(dvalues_c, weights_c.T)
 
         self.dweights, self.dbiases = self.precision_policy.cast_to_param(dweights, dbiases)
-        self.dinputs = dinputs_c.astype(self.inputs.dtype, copy=False)
+        if self.needs_input_grad:
+            dinputs_c = xp.dot(dvalues_c, weights_c.T)
+            self.dinputs = dinputs_c.astype(self.inputs.dtype, copy=False)
+        else:
+            self.dinputs = None
 
         self._inputs_compute = None
         self._weights_compute = None

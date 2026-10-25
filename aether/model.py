@@ -500,6 +500,13 @@ class Model:
             if getattr(layer, "weights", None) is not None or getattr(layer, "biases", None) is not None
         ]
 
+        # Nothing below the first trainable layer consumes a gradient, so backward stops
+        # there and that layer skips its dX.
+        first = self.layers.index(self.trainable_layers[0]) if self.trainable_layers else 0
+        self._backward_layers = tuple(reversed(self.layers[first:]))
+        if self.trainable_layers:
+            self.trainable_layers[0].needs_input_grad = False
+
         if self.loss is not None:
             self.loss.validate_graph(layers=self.layers)
             self.loss.remember_trainable_layers(self.trainable_layers)
@@ -653,10 +660,11 @@ class Model:
 
     def backward(self, loss_dinputs):
         """
-        Sequentially propagate loss gradients backward through layers in reverse order.
+        Propagate loss gradients backward through layers in reverse order, stopping
+        at the first trainable layer. Returns None when that layer skips its dX.
         """
         dinputs = loss_dinputs
-        for layer in reversed(self.layers):
+        for layer in self._backward_layers:
             dinputs = layer.backward(dinputs)
         return dinputs
 
