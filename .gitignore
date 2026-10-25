@@ -10,3 +10,4 @@ build/
 .devcontainer/.cupy_cache/
 .vscode/
 .venv/
+benchmarks/results/
