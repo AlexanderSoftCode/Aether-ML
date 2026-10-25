@@ -195,6 +195,9 @@ extern "C" __global__ void conv_forward_wmma(
     const int warp_id  = threadIdx.x / WARP_SIZE;
     const int warp_row = warp_id / WARPS_N;
     const int warp_col = warp_id % WARPS_N;
+    // Warps whose 16 columns lie past C_OUT would multiply zeros; skip them.
+    const bool warp_live = warp_row < WARPS_M && warp_col < WARPS_N
+                        && n_tile_start + warp_col * WMMA_N < C_OUT;
 
     __shared__ half As[BLOCK_TILE_M][WMMA_K + 8];
     __shared__ half Bs[WMMA_K][BLOCK_TILE_N + 8];
@@ -250,7 +253,7 @@ extern "C" __global__ void conv_forward_wmma(
 
         __syncthreads();
 
-        if (warp_row < WARPS_M && warp_col < WARPS_N) {
+        if (warp_live) {
             load_matrix_sync(a_frag, &As[warp_row * WMMA_M][0], WMMA_K + 8);
             load_matrix_sync(b_frag, &Bs[0][warp_col * WMMA_N], BLOCK_TILE_N + 8);
             mma_sync(acc_frag, a_frag, b_frag, acc_frag);
@@ -351,6 +354,11 @@ extern "C" __global__ void __launch_bounds__(THREADS) conv_backward_dweight_wmma
     const int warp_id  = threadIdx.x / WARP_SIZE;
     const int warp_row = warp_id / WARPS_N;
     const int warp_col = warp_id % WARPS_N;
+    // Warps whose 16x16 tile lies past K_TOTAL or C_OUT would multiply
+    // zeros (e.g. C_OUT=32 or K_TOTAL=27 leave half the 64x64 tile empty).
+    const bool warp_live = warp_row < WARPS_M && warp_col < WARPS_N
+                        && k_tile_start + warp_row * WMMA_M < K_TOTAL
+                        && n_tile_start + warp_col * WMMA_N < C_OUT;
 
     __shared__ half As[WMMA_K][A_LD];
     __shared__ half Bs[WMMA_K][BLOCK_TILE_N + B_PAD];
@@ -447,7 +455,7 @@ extern "C" __global__ void __launch_bounds__(THREADS) conv_backward_dweight_wmma
 
         __syncthreads();
 
-        if (warp_row < WARPS_M && warp_col < WARPS_N) {
+        if (warp_live) {
             // col_major: element (i, j) == ptr[i + j * ldm] == As[pixel j][filter i]
             load_matrix_sync(a_frag, &As[0][warp_row * WMMA_M], A_LD);
             load_matrix_sync(b_frag, &Bs[0][warp_col * WMMA_N], BLOCK_TILE_N + B_PAD);
@@ -576,6 +584,9 @@ extern "C" __global__ void __launch_bounds__(THREADS) conv_backward_dinput_wmma(
     const int warp_id  = threadIdx.x / WARP_SIZE;
     const int warp_row = warp_id / WARPS_N;
     const int warp_col = warp_id % WARPS_N;
+    // Warps whose 16 columns lie past C_IN would multiply zeros; skip them.
+    const bool warp_live = warp_row < WARPS_M && warp_col < WARPS_N
+                        && n_tile_start + warp_col * WMMA_N < C_IN;
 
     __shared__ half As[BLOCK_TILE_M][WMMA_K + 8];
     __shared__ half Bs[WMMA_K][BLOCK_TILE_N + 8];
@@ -670,7 +681,7 @@ extern "C" __global__ void __launch_bounds__(THREADS) conv_backward_dinput_wmma(
 
         __syncthreads();
 
-        if (warp_row < WARPS_M && warp_col < WARPS_N) {
+        if (warp_live) {
             load_matrix_sync(a_frag, &As[warp_row * WMMA_M][0], WMMA_K + 8);
             load_matrix_sync(b_frag, &Bs[0][warp_col * WMMA_N], BLOCK_TILE_N + 8);
             mma_sync(acc_frag, a_frag, b_frag, acc_frag);

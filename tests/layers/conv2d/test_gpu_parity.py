@@ -281,6 +281,29 @@ class TestConvGpuParity(ConvLayerTestBase):
             stride=(1, 1), padding="same", filter_size=(2, 2),
         )
 
+    def test_conv_gpu_partial_second_column_tile_parity(self):
+        """84 = 64 + 16 + 4 channels on the GEMM N axis (C_out, or C_in for dinput).
+
+        In the second 64-wide N tile warp 0 is full, warp 1 holds 4 valid
+        columns and warps 2-3 are empty. The kernels skip empty warps, so a
+        liveness check that ignores the tile offset or drops a partly valid
+        warp loses columns here.
+        """
+        if self.backend_name != 'cupy':
+            self.skipTest("CuPy backend required for GPU kernel tests")
+        from aether.custom_kernels import conv_kernel
+        if not conv_kernel.get_is_conv_gpu_available():
+            self.skipTest("Matrix-core GPU kernels not available on this device")
+
+        layer = self._make_same_layer((8, 8), (3, 3), (1, 1), in_channels=8, out_channels=84)
+        x = self.xp.random.randn(2, 8, 8, 8).astype(self.xp.float32)
+        self._assert_gemm_close(
+            layer._forward_gpu(x, training=False),
+            layer._forward_fallback(x, training=False), "forward", tol=1e-2,
+        )
+        self._run_dweight_kernel_parity(S=2, spatial=(8, 8), in_channels=8, out_channels=84)
+        self._run_dinput_kernel_parity(S=2, spatial=(8, 8), in_channels=84, out_channels=8)
+
     def test_backward_fallback_on_forward_compile_failure(self):
         """Regression: when forward GPU kernel fails, backward must also fall back.
 
