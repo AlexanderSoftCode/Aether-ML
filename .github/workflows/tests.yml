@@ -15,8 +15,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Skips the suite when only files it doesn't cover changed. A skipped job still
+  # reports a status; a workflow skipped by paths-ignore leaves checks pending.
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: filter
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          # No base to diff against (manual run, new branch): run everything.
+          code=true
+          if [ -n "$BASE" ] && git fetch -q --depth=1 origin "$BASE"; then
+            files=$(git diff --name-only "$BASE" HEAD)
+            grep -qvE '^((examples|notebooks|benchmarks)/|README\.md$)' <<< "$files" || code=false
+          fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+
   test:
     name: Python ${{ matrix.python-version }}
+    needs: detect-changes
+    if: needs.detect-changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
