@@ -96,35 +96,24 @@ _WMMA_DIM = 16
 _WARP_SIZE = 32
 
 # LDS padding for the dweight kernel's staging buffers, in halves. Tuned
-# empirically against the column-major A-fragment read pattern via
-# examples/cifar10/dweight_bench.py -- see the sweep there before changing.
+# empirically against the column-major A-fragment read pattern; re-sweep
+# before changing.
 _DWEIGHT_A_PAD = 8
 _DWEIGHT_B_PAD = 8
 
-
-_MP_COUNT = None
-
-
-def get_device_multiprocessor_count():
-    """Memoized MP count, used to size the dweight split-K grid."""
-    global _MP_COUNT
-    if _MP_COUNT is None:
-        try:
-            device = config.cp.cuda.Device()
-            props = config.cp.cuda.runtime.getDeviceProperties(device.id)
-            _MP_COUNT = int(props['multiProcessorCount'])
-        except config.cp.cuda.runtime.CUDARuntimeError:
-            _MP_COUNT = 32
-    return _MP_COUNT
-
-
-def choose_dweight_split_k(num_m_tiles, grid_x, grid_y):
+# No stream-K algorithm because I said so
+def choose_dweight_split_k(num_m_tiles, grid_x, grid_y, threads_per_block):
     """Pick the number of split-K slices for the dweight grid.
+
+    The grid should fill every resident block slot once: fewer blocks leave
+    the GPU idle, and splitting past one wave only adds per-block epilogues
+    and a ragged tail. Threads are the binding occupancy limit for this
+    kernel (LDS and registers allow more blocks per MP).
     """
-    mp_count = get_device_multiprocessor_count()
+    mp_count, max_threads_per_mp = config.get_device_multiprocessor_limits()
+    slots = mp_count * max(1, max_threads_per_mp // threads_per_block)
     b_2d = max(1, grid_x * grid_y)
-    target_blocks = (4 if b_2d == 1 else 2) * mp_count
-    return max(1, min(num_m_tiles, target_blocks // b_2d))
+    return max(1, min(num_m_tiles, slots // b_2d))
 
 
 # --- Vendor substitution dictionaries --------------------------------------
@@ -913,7 +902,7 @@ def plan_dweight_launch(shape_meta: ConvShapeMeta, S: int):
     grid_x = int(-(-shape_meta.K_total // launch["block_tile_m"]))
     grid_y = int(-(-shape_meta.C_out // launch["block_tile_n"]))
     num_m_tiles = int(-(-M_total // _WMMA_DIM))
-    split_k = choose_dweight_split_k(num_m_tiles, grid_x, grid_y)
+    split_k = choose_dweight_split_k(num_m_tiles, grid_x, grid_y, launch["block"][0])
 
     return ConvLaunchPlan(
         kernel, (grid_x, grid_y, split_k), launch["block"], M_total, shape_meta
