@@ -257,9 +257,9 @@ class Conv2d(Layer):
 
         shape_meta = self._get_shape_meta((H_in, W_in, C_in))
         dw_plan = conv_kernel.plan_dweight_launch(shape_meta, S)
-        dx_plan = conv_kernel.plan_dinput_launch(shape_meta, S)
+        dx_plan = conv_kernel.plan_dinput_launch(shape_meta, S) if self.needs_input_grad else None
 
-        if dw_plan is None or dx_plan is None:
+        if dw_plan is None or (self.needs_input_grad and dx_plan is None):
             raise RuntimeError(
                 f"Failed to compile GPU backward kernels for Conv shape "
                 f"(H_in={H_in}, W_in={W_in}, C_in={C_in}, C_out={self.C_out})."
@@ -275,9 +275,12 @@ class Conv2d(Layer):
 
         self.dbiases = xp.zeros((self.C_out,), dtype=xp.float32)
         self.dweights = xp.zeros((fH, fW, C_in, self.C_out), dtype=xp.float32)
-        self.dinputs = xp.empty_like(self.inputs, dtype=xp.float32)
-
         dw_plan(inputs_fp16, dvalues_fp16, self.dweights, self.dbiases)
+
+        if dx_plan is None:
+            self.dinputs = None
+            return None
+        self.dinputs = xp.empty_like(self.inputs, dtype=xp.float32)
         dx_plan(dvalues_fp16, self._fp16_weight_cache, self.dinputs)
 
         return self.dinputs
@@ -350,6 +353,10 @@ class Conv2d(Layer):
         # Now we need to account for dbiases and dweights
         self.dbiases = xp.sum(dvalues, axis = (0, 1, 2))
         self.dweights = xp.tensordot(patches, dvalues, axes = ([0, 1, 2], [0, 1, 2]))
+
+        if not self.needs_input_grad:
+            self.dinputs = None
+            return None
 
         dilated_H = (H_out - 1) * sH + 1
         dilated_W = (W_out - 1) * sW + 1

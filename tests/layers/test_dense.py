@@ -230,4 +230,19 @@ class TestDenseLayer(base_case.AetherBaseLayerTestCase):
             err_msg="build(seed=None) failed to follow global backend seeding."
         )
 
+    def test_backward_without_input_grad_keeps_parameter_grads(self):
+        """needs_input_grad=False drops dX only; dW/dB must match a normal backward."""
+        dvalues = self.xp.random.randn(self.BATCH_SIZE, self.N_NEURONS).astype(self.xp.float32)
+
+        self.layer.forward(self.test_inputs, training=True)
+        self.assertIsNotNone(self.layer.backward(dvalues))
+        expected_dw, expected_db = self.layer.dweights.copy(), self.layer.dbiases.copy()
+
+        self.layer.needs_input_grad = False
+        self.layer.forward(self.test_inputs, training=True)
+        self.assertIsNone(self.layer.backward(dvalues))
+        self.assertIsNone(self.layer.dinputs)
+        self.xp.testing.assert_array_equal(self.layer.dweights, expected_dw)
+        self.xp.testing.assert_array_equal(self.layer.dbiases, expected_db)
+
 base_case.register_test_suites(globals(), TestDenseLayer)

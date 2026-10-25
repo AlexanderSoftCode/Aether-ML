@@ -1,6 +1,5 @@
 import contextlib
 import io
-import unittest
 
 import numpy as np
 
@@ -158,6 +157,54 @@ class TestModelTrainBase(ModelBaseTestCase):
             accuracy=CategoricalAccuracy(),
         )
         return model
+
+    def _make_leading_relu_model(self):
+        model = Model()
+        model.to(self.backend_name)
+        model.add(ReLU())
+        model.add(Dense(n_inputs=4, n_neurons=8))
+        model.add(ReLU())
+        model.add(Dense(n_inputs=8, n_neurons=self.NUM_CLASSES))
+        model.configure(
+            loss=CategoricalCrossEntropy(),
+            optimizer=Adam(lr=0.01),
+            accuracy=CategoricalAccuracy(),
+        )
+        model.manual_seed(7)
+        model.finalize(input_shape=(self.NUM_FEATURES,))
+        return model
+
+    def test_backward_stops_at_first_trainable_layer(self):
+        model = self._make_leading_relu_model()
+        _, dense_1, _, dense_2 = model.layers
+        self.assertFalse(dense_1.needs_input_grad)
+        self.assertTrue(dense_2.needs_input_grad)
+
+        calls = []
+        for name, layer in zip(("relu0", "dense1", "relu1", "dense2"), model.layers):
+            real = layer.backward
+            layer.backward = lambda d, real=real, name=name: (calls.append(name), real(d))[1]
+
+        out = model.forward(self.X, training=True)
+        model.loss.calculate(out, self.y)
+        model.loss.backward(out, self.y)
+        self.assertIsNone(model.backward(model.loss.dinputs))
+        self.assertEqual(calls, ["dense2", "relu1", "dense1"])
+        self.assertIsNone(dense_1.dinputs)
+
+    def test_skipping_first_layer_dinputs_leaves_training_unchanged(self):
+        """The cut must not change any weight: compare to a run that backprops through everything."""
+        skipped = self._make_leading_relu_model()
+        full = self._make_leading_relu_model()
+        full._backward_layers = tuple(reversed(full.layers))
+        full.trainable_layers[0].needs_input_grad = True
+
+        for model in (skipped, full):
+            model.train(self.X, self.y, epochs=3, batch_size=8, verbose=False)
+
+        for a, b in zip(skipped.trainable_layers, full.trainable_layers):
+            self.xp.testing.assert_array_equal(a.weights, b.weights)
+            self.xp.testing.assert_array_equal(a.biases, b.biases)
 
     def test_seeded_shuffle_is_reproducible(self):
         model_a = self._make_model()
