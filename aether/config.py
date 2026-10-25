@@ -24,6 +24,7 @@ build_kernel(factory, name)  -- deferred JIT builder for ElementwiseKernel/Reduc
 fuse_kernel(*args, **kwargs) -- decorator wrapping cp.fuse for elementwise kernels
 resolve_gpu_launch_geometry()-- CUDA vs HIP variant + recommended threads-per-block (1024 / 512)
 get_tensor_core_capable()    -- probes gfx9/11/12 (HIP) or compute capability >=70 (CUDA)
+get_device_multiprocessor_limits() -- memoized (MP count, max resident threads per MP) for occupancy-sized grids
 
 RNG & Training Synchronization
 ---------------------------------
@@ -188,6 +189,36 @@ def get_tensor_core_capable():
         _TENSOR_CORE_CAPABLE = False
 
     return _TENSOR_CORE_CAPABLE
+
+_MP_LIMITS = None
+
+def get_device_multiprocessor_limits():
+    """Memoized (MP count, max resident threads per MP).
+
+    Both come from the same device properties, so they share a unit: SMs on
+    NVIDIA, WGPs on RDNA, CUs on CDNA. Falls back to (32, 2048) if CuPy is
+    unavailable or the probe fails.
+    """
+    global _MP_LIMITS
+    if _MP_LIMITS is not None:
+        return _MP_LIMITS
+
+    if not HAS_CUPY:
+        _MP_LIMITS = (32, 2048)
+        return _MP_LIMITS
+
+    try:
+        device = cp.cuda.Device()
+        props = cp.cuda.runtime.getDeviceProperties(device.id)
+        _MP_LIMITS = (int(props['multiProcessorCount']),
+                      int(props['maxThreadsPerMultiProcessor']))
+    except cp.cuda.runtime.CUDARuntimeError as e:
+        warnings.warn(
+            f"[aether] multiprocessor limits probe failed: {e}"
+        )
+        _MP_LIMITS = (32, 2048)
+
+    return _MP_LIMITS
 
 def derive_stream_seed(base_seed, stream_id):
     """

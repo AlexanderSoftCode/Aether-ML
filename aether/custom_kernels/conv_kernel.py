@@ -96,35 +96,24 @@ _WMMA_DIM = 16
 _WARP_SIZE = 32
 
 # LDS padding for the dweight kernel's staging buffers, in halves. Tuned
-# empirically against the column-major A-fragment read pattern via
-# examples/cifar10/dweight_bench.py -- see the sweep there before changing.
+# empirically against the column-major A-fragment read pattern; re-sweep
+# before changing.
 _DWEIGHT_A_PAD = 8
 _DWEIGHT_B_PAD = 8
 
-
-_MP_COUNT = None
-
-
-def get_device_multiprocessor_count():
-    """Memoized MP count, used to size the dweight split-K grid."""
-    global _MP_COUNT
-    if _MP_COUNT is None:
-        try:
-            device = config.cp.cuda.Device()
-            props = config.cp.cuda.runtime.getDeviceProperties(device.id)
-            _MP_COUNT = int(props['multiProcessorCount'])
-        except config.cp.cuda.runtime.CUDARuntimeError:
-            _MP_COUNT = 32
-    return _MP_COUNT
-
-
-def choose_dweight_split_k(num_m_tiles, grid_x, grid_y):
+# No stream-K algorithm because I said so
+def choose_dweight_split_k(num_m_tiles, grid_x, grid_y, threads_per_block):
     """Pick the number of split-K slices for the dweight grid.
+
+    The grid should fill every resident block slot once: fewer blocks leave
+    the GPU idle, and splitting past one wave only adds per-block epilogues
+    and a ragged tail. Threads are the binding occupancy limit for this
+    kernel (LDS and registers allow more blocks per MP).
     """
-    mp_count = get_device_multiprocessor_count()
+    mp_count, max_threads_per_mp = config.get_device_multiprocessor_limits()
+    slots = mp_count * max(1, max_threads_per_mp // threads_per_block)
     b_2d = max(1, grid_x * grid_y)
-    target_blocks = (4 if b_2d == 1 else 2) * mp_count
-    return max(1, min(num_m_tiles, target_blocks // b_2d))
+    return max(1, min(num_m_tiles, slots // b_2d))
 
 
 # --- Vendor substitution dictionaries --------------------------------------
@@ -206,6 +195,9 @@ extern "C" __global__ void conv_forward_wmma(
     const int warp_id  = threadIdx.x / WARP_SIZE;
     const int warp_row = warp_id / WARPS_N;
     const int warp_col = warp_id % WARPS_N;
+    // Warps whose 16 columns lie past C_OUT would multiply zeros; skip them.
+    const bool warp_live = warp_row < WARPS_M && warp_col < WARPS_N
+                        && n_tile_start + warp_col * WMMA_N < C_OUT;
 
     __shared__ half As[BLOCK_TILE_M][WMMA_K + 8];
     __shared__ half Bs[WMMA_K][BLOCK_TILE_N + 8];
@@ -261,7 +253,7 @@ extern "C" __global__ void conv_forward_wmma(
 
         __syncthreads();
 
-        if (warp_row < WARPS_M && warp_col < WARPS_N) {
+        if (warp_live) {
             load_matrix_sync(a_frag, &As[warp_row * WMMA_M][0], WMMA_K + 8);
             load_matrix_sync(b_frag, &Bs[0][warp_col * WMMA_N], BLOCK_TILE_N + 8);
             mma_sync(acc_frag, a_frag, b_frag, acc_frag);
@@ -362,6 +354,11 @@ extern "C" __global__ void __launch_bounds__(THREADS) conv_backward_dweight_wmma
     const int warp_id  = threadIdx.x / WARP_SIZE;
     const int warp_row = warp_id / WARPS_N;
     const int warp_col = warp_id % WARPS_N;
+    // Warps whose 16x16 tile lies past K_TOTAL or C_OUT would multiply
+    // zeros (e.g. C_OUT=32 or K_TOTAL=27 leave half the 64x64 tile empty).
+    const bool warp_live = warp_row < WARPS_M && warp_col < WARPS_N
+                        && k_tile_start + warp_row * WMMA_M < K_TOTAL
+                        && n_tile_start + warp_col * WMMA_N < C_OUT;
 
     __shared__ half As[WMMA_K][A_LD];
     __shared__ half Bs[WMMA_K][BLOCK_TILE_N + B_PAD];
@@ -458,7 +455,7 @@ extern "C" __global__ void __launch_bounds__(THREADS) conv_backward_dweight_wmma
 
         __syncthreads();
 
-        if (warp_row < WARPS_M && warp_col < WARPS_N) {
+        if (warp_live) {
             // col_major: element (i, j) == ptr[i + j * ldm] == As[pixel j][filter i]
             load_matrix_sync(a_frag, &As[0][warp_row * WMMA_M], A_LD);
             load_matrix_sync(b_frag, &Bs[0][warp_col * WMMA_N], BLOCK_TILE_N + B_PAD);
@@ -587,6 +584,9 @@ extern "C" __global__ void __launch_bounds__(THREADS) conv_backward_dinput_wmma(
     const int warp_id  = threadIdx.x / WARP_SIZE;
     const int warp_row = warp_id / WARPS_N;
     const int warp_col = warp_id % WARPS_N;
+    // Warps whose 16 columns lie past C_IN would multiply zeros; skip them.
+    const bool warp_live = warp_row < WARPS_M && warp_col < WARPS_N
+                        && n_tile_start + warp_col * WMMA_N < C_IN;
 
     __shared__ half As[BLOCK_TILE_M][WMMA_K + 8];
     __shared__ half Bs[WMMA_K][BLOCK_TILE_N + 8];
@@ -681,7 +681,7 @@ extern "C" __global__ void __launch_bounds__(THREADS) conv_backward_dinput_wmma(
 
         __syncthreads();
 
-        if (warp_row < WARPS_M && warp_col < WARPS_N) {
+        if (warp_live) {
             load_matrix_sync(a_frag, &As[warp_row * WMMA_M][0], WMMA_K + 8);
             load_matrix_sync(b_frag, &Bs[0][warp_col * WMMA_N], BLOCK_TILE_N + 8);
             mma_sync(acc_frag, a_frag, b_frag, acc_frag);
@@ -913,7 +913,7 @@ def plan_dweight_launch(shape_meta: ConvShapeMeta, S: int):
     grid_x = int(-(-shape_meta.K_total // launch["block_tile_m"]))
     grid_y = int(-(-shape_meta.C_out // launch["block_tile_n"]))
     num_m_tiles = int(-(-M_total // _WMMA_DIM))
-    split_k = choose_dweight_split_k(num_m_tiles, grid_x, grid_y)
+    split_k = choose_dweight_split_k(num_m_tiles, grid_x, grid_y, launch["block"][0])
 
     return ConvLaunchPlan(
         kernel, (grid_x, grid_y, split_k), launch["block"], M_total, shape_meta
