@@ -45,6 +45,19 @@ class TestConvKernelCompileFallback(base_case.AetherBaseTestCase):
                     self.assertIn(self.SHAPE_META.cache_key, cache)
                     self.assertIsNone(cache[self.SHAPE_META.cache_key])
 
+    def test_cast_kernel_failure_warns_and_returns_none(self):
+        cache, key = conv_kernel._CONV_BACKWARD_CAST_CACHE, config.IS_HIP
+        if key in cache:
+            self.addCleanup(cache.__setitem__, key, cache.pop(key))
+        else:
+            self.addCleanup(cache.pop, key, None)
+        operand = self.xp.zeros((2, 3), dtype=self.xp.float32)
+        error = config.cp.cuda.compiler.CompileException("bad source", "", "cast", ())
+        with mock.patch.object(config.cp, "RawModule", side_effect=error), \
+             self.assertWarns(UserWarning):
+            self.assertIsNone(conv_kernel.cast_backward_operands_fp16(operand, operand))
+        self.assertIsNone(cache[key])
+
     def test_python_error_is_not_swallowed(self):
         for getter, cache in self.GETTERS:
             with self.subTest(getter=getter.__name__):

@@ -281,6 +281,15 @@ class TestConvGpuParity(ConvLayerTestBase):
             stride=(1, 1), padding="same", filter_size=(2, 2),
         )
 
+    def test_conv_gpu_backward_parity_without_cast_kernel(self):
+        """_backward_gpu's astype/clip path, taken when the fused cast kernel is unavailable."""
+        from aether.custom_kernels import conv_kernel
+        with mock.patch.object(conv_kernel, "cast_backward_operands_fp16", return_value=None) as cast:
+            self._run_dweight_kernel_parity(S=2, spatial=(8, 8), in_channels=8, out_channels=20)
+            self._run_dinput_kernel_parity(S=2, spatial=(8, 8), in_channels=8, out_channels=20)
+        if self.backend_name == 'cupy' and conv_kernel.get_is_conv_gpu_available():
+            self.assertGreater(cast.call_count, 0)
+
     def test_conv_gpu_partial_second_column_tile_parity(self):
         """84 = 64 + 16 + 4 channels on the GEMM N axis (C_out, or C_in for dinput).
 
