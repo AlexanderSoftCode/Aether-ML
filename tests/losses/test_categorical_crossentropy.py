@@ -1,5 +1,6 @@
 import aether.config as config
 import tests.base_case as base_case
+from aether.layers.linear import Dense
 from aether.losses.categorical_crossentropy import CategoricalCrossEntropy
 
 
@@ -268,6 +269,30 @@ class TestLossCCE(base_case.AetherBaseTestCase):
 
         self.assertEqual(self.layer.accumulated_sum, 0)
         self.assertEqual(self.layer.accumulated_count, 0)
+
+    # ---- Regularization ---------------------
+
+    def test_regularization_loss_known_values(self):
+        """One regularizer per layer, weights [1, 2] and biases [3, -1] each, so dropping
+        any of the four terms changes the total; the unregularized layer adds nothing."""
+        regularizers = [
+            {"l1": (0.2,)},         # 0.2 * (1 + 2)                = 0.6
+            {"l2": (0.1,)},         # 0.5 * 0.1 * (1 + 4)          = 0.25
+            {"l1": (0.0, 0.3)},     # 0.3 * (3 + 1)                = 1.2
+            {"l2": (0.0, 0.4)},     # 0.5 * 0.4 * (9 + 1)          = 2.0
+            {},                     # unregularized                = 0
+        ]
+        layers = []
+        for kwargs in regularizers:
+            layer = self.make_built_layer(Dense, input_shape=(1,), n_inputs=1, n_neurons=2, **kwargs)
+            layer.weights = self.xp.array([[1.0, 2.0]], dtype=self.xp.float32)
+            layer.biases = self.xp.array([[3.0, -1.0]], dtype=self.xp.float32)
+            layers.append(layer)
+        layers[-1].weights = self.xp.array([[100.0, 100.0]], dtype=self.xp.float32)
+
+        self.layer.remember_trainable_layers(layers)
+
+        self.assertAlmostEqual(float(self.layer.regularization_loss()), 4.05, places=5)
 
 
 base_case.register_test_suites(globals(), TestLossCCE)

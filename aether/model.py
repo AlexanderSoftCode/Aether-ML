@@ -786,13 +786,7 @@ class Model:
         step_optimizer = self._step_optimizer
         advance_rng = self._rng_clock.advance
         shuffle_rng = self._shuffle_rng
-        has_reg = hasattr(loss, "regularization_loss") and any(
-            getattr(layer, "weight_regularizer_l1", 0.0) > 0.0
-            or getattr(layer, "weight_regularizer_l2", 0.0) > 0.0
-            or getattr(layer, "bias_regularizer_l1", 0.0) > 0.0
-            or getattr(layer, "bias_regularizer_l2", 0.0) > 0.0
-            for layer in self.trainable_layers
-        )
+        has_reg = bool(getattr(loss, "regularized_layers", ()))
         reg_loss_fn = loss.regularization_loss if has_reg else (lambda: 0.0)
 
         def run_step(batch_X, batch_y):
