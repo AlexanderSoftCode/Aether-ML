@@ -1,9 +1,11 @@
 import contextlib
 import io
+from unittest import mock
 
 import numpy as np
 
 import aether.config as config
+from aether._utils.progress import make_progress
 from aether.layers import Dense, ReLU
 from aether.losses import CategoricalCrossEntropy, Loss
 from aether.metrics import CategoricalAccuracy, RegressionAccuracy
@@ -101,17 +103,22 @@ class TestModelTrainBase(ModelBaseTestCase):
         self.assertFalse(self.xp.allclose(initial_weights, trainable_layer.weights))
 
     def test_train_with_regularization(self):
-        model = Model()
-        model.to(self.backend_name)
-        model.add(Dense(n_inputs=4, n_neurons=self.NUM_CLASSES, l2=(0.01)))
-        model.configure(
-            loss=CategoricalCrossEntropy(),
-            optimizer=AdamW(lr=0.01),
-            accuracy=CategoricalAccuracy()
-        )
-        model.finalize(input_shape=(self.NUM_FEATURES,))
+        """train() tracks the regularization loss only when some layer is regularized."""
+        for l2, expected in (((0.01,), True), ((), False)):
+            with self.subTest(l2=l2):
+                model = Model()
+                model.to(self.backend_name)
+                model.add(Dense(n_inputs=4, n_neurons=self.NUM_CLASSES, l2=l2))
+                model.configure(
+                    loss=CategoricalCrossEntropy(),
+                    optimizer=AdamW(lr=0.01),
+                    accuracy=CategoricalAccuracy()
+                )
+                model.finalize(input_shape=(self.NUM_FEATURES,))
 
-        model.train(self.X, self.y, epochs=1, batch_size=16, verbose=False)
+                with mock.patch("aether.model.make_progress", wraps=make_progress) as progress:
+                    model.train(self.X, self.y, epochs=1, batch_size=16, verbose=False)
+                self.assertIs(progress.call_args.args[3], expected)  # has_reg
 
     def test_train_with_validation_data(self):
         self.model.finalize(input_shape=(self.NUM_FEATURES,))

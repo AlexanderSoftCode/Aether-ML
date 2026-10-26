@@ -59,7 +59,14 @@ class Loss:
         Used by Model.save() / Model.load()."""
         return {}
     def remember_trainable_layers(self, trainable_layers):
-        self.trainable_layers = trainable_layers
+        # Regularizers are fixed at construction, so filter once here, not every step.
+        self.regularized_layers = [
+            layer for layer in trainable_layers
+            if getattr(layer, "weight_regularizer_l1", 0.0) > 0
+            or getattr(layer, "weight_regularizer_l2", 0.0) > 0
+            or getattr(layer, "bias_regularizer_l1", 0.0) > 0
+            or getattr(layer, "bias_regularizer_l2", 0.0) > 0
+        ]
 
     def calculate(self, output, y, *, include_regularization= False, training = True):
         xp = config.get_array_module(output)
@@ -85,24 +92,23 @@ class Loss:
     def regularization_loss(self):
         regularization_loss = 0             # if we don't do this, we risk overfitting.
                                             # We will have to denote partials for this too...
-        for layer in getattr(self, "trainable_layers", []):        
+        # Params are always fp32 (config.PARAM_DTYPE), so no cast is needed.
+        for layer in getattr(self, "regularized_layers", []):
             xp = config.get_array_module(layer.weights)
-            
-            weights_fp32 = layer.weights.astype(xp.float32, copy=False)
-            biases_fp32 = layer.biases.astype(xp.float32, copy=False)
+            weights, biases = layer.weights, layer.biases
 
             if layer.weight_regularizer_l1 > 0:
                 regularization_loss += layer.weight_regularizer_l1 * \
-                                        xp.sum(xp.abs(weights_fp32))
+                                        xp.sum(xp.abs(weights))
             if layer.weight_regularizer_l2 > 0:
                 regularization_loss += 0.5 * layer.weight_regularizer_l2 * \
-                                        xp.sum(weights_fp32 * weights_fp32)
+                                        xp.sum(weights * weights)
             if layer.bias_regularizer_l1 > 0:
                 regularization_loss += layer.bias_regularizer_l1 * \
-                                        xp.sum(xp.abs(biases_fp32))
+                                        xp.sum(xp.abs(biases))
             if layer.bias_regularizer_l2 > 0:
                 regularization_loss += 0.5 * layer.bias_regularizer_l2 * \
-                                        xp.sum(biases_fp32 * biases_fp32) 
+                                        xp.sum(biases * biases)
         return regularization_loss
 
 
