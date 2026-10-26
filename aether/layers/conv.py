@@ -265,10 +265,15 @@ class Conv2d(Layer):
                 f"(H_in={H_in}, W_in={W_in}, C_in={C_in}, C_out={self.C_out})."
             )
 
-        dvalues_fp32 = dvalues.astype(xp.float32, copy=False)
-        dvalues_bounded = xp.clip(dvalues_fp32, -65504.0, 65504.0)
-        dvalues_fp16 = dvalues_bounded.astype(xp.float16, copy=False)
-        inputs_fp16 = self.inputs.astype(xp.float16, copy=False)
+        dvalues_fp32 = xp.ascontiguousarray(dvalues, dtype=xp.float32)
+        inputs_fp32 = xp.ascontiguousarray(self.inputs, dtype=xp.float32)
+        cast = conv_kernel.cast_backward_operands_fp16(dvalues_fp32, inputs_fp32)
+        if cast is not None:
+            dvalues_fp16, inputs_fp16 = cast
+        else:
+            dvalues_bounded = xp.clip(dvalues_fp32, -65504.0, 65504.0)
+            dvalues_fp16 = dvalues_bounded.astype(xp.float16, copy=False)
+            inputs_fp16 = inputs_fp32.astype(xp.float16, copy=False)
 
         if not self._fp16_weight_valid:
             self._refresh_fp16_weights(xp)

@@ -54,13 +54,7 @@ class ConvShapeMeta:
 
     @classmethod
     def create(cls, spatial_shape, C_out, filter_size, stride, padding, is_hip=None):
-        """Derive padding and output extents from a layer's configuration.
-
-        This is the only place the conv spatial geometry is computed. Callers
-        -- layers, benchmarks, profilers -- must go through here rather than
-        rederiving it, so a script can never silently disagree with the
-        kernel about what shape it is running.
-        """
+        """Derive padding and output extents from a layer's configuration."""
         H_in, W_in, C_in = spatial_shape
         fH, fW = filter_size
         sH, sW = stride
@@ -91,6 +85,12 @@ _BLOCK_TILE_M = 64
 _BLOCK_TILE_N = 64
 _WMMA_DIM = 16
 _WARP_SIZE = 32
+
+# RawModule options shared by every conv kernel. No -I for ROCm: hiprtc already
+# searches its own install's include dir (where rocWMMA lives), and a -I from
+# ROCM_PATH would be searched first, so a stale ROCM_PATH could shadow it.
+_COMPILE_OPTIONS = ('-std=c++17',)
+
 
 # --- Vendor substitution dictionaries --------------------------------------
 
@@ -146,4 +146,3 @@ class ConvLaunchPlan:
 
 def _m_total(shape_meta: ConvShapeMeta, S: int):
     return np.int64(S * shape_meta.H_out * shape_meta.W_out)
-

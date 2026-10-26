@@ -1,4 +1,3 @@
-import os
 import warnings
 from string import Template
 
@@ -6,6 +5,7 @@ import aether.config as config
 from aether.custom_kernels.conv_kernel.common import (
     _BLOCK_TILE_M,
     _BLOCK_TILE_N,
+    _COMPILE_OPTIONS,
     _CONV_CUDA,
     _CONV_HIP,
     _WMMA_DIM,
@@ -283,13 +283,8 @@ def get_compiled_backward_dweight_kernel(shape_meta: ConvShapeMeta):
         **vendor,
     )
 
-    options = ('-std=c++17',)
-    if shape_meta.is_hip:
-        rocm_path = os.environ.get('ROCM_PATH', '/opt/rocm')
-        options = options + (f'-I{rocm_path}/include',)
-
     try:
-        module = config.cp.RawModule(code=source, options=options)
+        module = config.cp.RawModule(code=source, options=_COMPILE_OPTIONS)
         kernel = module.get_function('conv_backward_dweight_wmma')
     except (config.cp.cuda.compiler.CompileException, config.cp.cuda.driver.CUDADriverError) as e:
         warnings.warn(f"[aether] conv_kernel: matrix-core dweight compile failed: {e}")

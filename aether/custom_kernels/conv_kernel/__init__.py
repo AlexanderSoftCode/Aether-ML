@@ -4,7 +4,13 @@ common   -- shape metadata, launch plans, tile constants, vendor dicts
 forward  -- conv_forward_wmma
 dweight  -- conv_backward_dweight_wmma and its split-K sizing
 dinput   -- conv_backward_dinput_wmma
+cast     -- conv_backward_cast_fp16, the fp16 operands for both backward kernels
 """
+from aether.custom_kernels.conv_kernel.cast import (
+    _CONV_BACKWARD_CAST_CACHE,
+    cast_backward_operands_fp16,
+    get_compiled_backward_cast_kernel,
+)
 from aether.custom_kernels.conv_kernel.common import (
     ConvLaunchPlan,
     ConvShapeMeta,
@@ -28,12 +34,15 @@ from aether.custom_kernels.conv_kernel.forward import (
 )
 
 __all__ = [
+    "_CONV_BACKWARD_CAST_CACHE",
     "_CONV_BACKWARD_DINPUT_CACHE",
     "_CONV_BACKWARD_DWEIGHT_CACHE",
     "_CONV_FORWARD_KERNEL_CACHE",
     "ConvLaunchPlan",
     "ConvShapeMeta",
+    "cast_backward_operands_fp16",
     "choose_dweight_split_k",
+    "get_compiled_backward_cast_kernel",
     "get_compiled_backward_dinput_kernel",
     "get_compiled_backward_dweight_kernel",
     "get_compiled_forward_conv_kernel",
