@@ -10,6 +10,10 @@ class TestBatchNormLayer(base_case.AetherBaseLayerTestCase):
     NUM_CHANNELS_CONV = 8
     CONV_SHAPE = (4, 14, 14, 8)
 
+    # N = 4551 rows is not a multiple of the block's 8, C = 40 is not a multiple
+    # of 32, and the reduction spans many blocks.
+    RAGGED_SHAPE = (3, 37, 41, 40)
+
     EPSILON = 1e-5
     MOMENTUM = 0.9
 
@@ -181,30 +185,45 @@ class TestBatchNormLayer(base_case.AetherBaseLayerTestCase):
         self.layer_dense.forward(self.dense_inputs, training=True)
         self.assertEqual(len(self.layer_dense._launch_cache), 1)
 
+    def _make_ragged(self):
+        """A RAGGED_SHAPE layer with non-trivial gamma/beta, so a scale/inv_std mix-up
+        can't hide behind gamma = 1, plus a matching input batch."""
+        C = self.RAGGED_SHAPE[-1]
+        layer = self.make_built_layer(
+            BatchNorm, input_shape=self.RAGGED_SHAPE[1:], epsilon=self.EPSILON, momentum=self.MOMENTUM
+        )
+        layer.gamma = self.xp.random.uniform(0.5, 2.0, C).astype(self.xp.float32)
+        layer.beta = self.xp.random.randn(C).astype(self.xp.float32)
+        inputs = self.xp.random.randn(*self.RAGGED_SHAPE).astype(self.xp.float32) * 2.0 + 5.0
+        return layer, inputs
+
     def test_gpu_forward_training_parity(self):
         """Verify parity between fallback and GPU forward training implementations."""
         if self.backend_name != "cupy":
             self.skipTest("GPU parity test is only applicable on CuPy backend.")
 
-        # Execute fallback path
-        out_fallback = self.layer_conv._forward_fallback(self.conv_inputs, training=True)
-        mean_fallback = self.layer_conv.batch_mean.copy()
-        var_fallback = self.layer_conv.batch_var.copy()
-        running_mean_fallback = self.layer_conv.running_mean.copy()
-        running_var_fallback = self.layer_conv.running_var.copy()
+        for layer, inputs in [(self.layer_conv, self.conv_inputs), self._make_ragged()]:
+            C = inputs.shape[-1]
+            with self.subTest(shape=inputs.shape):
+                # Execute fallback path
+                out_fallback = layer._forward_fallback(inputs, training=True)
+                mean_fallback = layer.batch_mean.copy()
+                var_fallback = layer.batch_var.copy()
+                running_mean_fallback = layer.running_mean.copy()
+                running_var_fallback = layer.running_var.copy()
 
-        # Reset parameters and running statistics to identical initial state
-        self.layer_conv.running_mean = self.xp.zeros(self.NUM_CHANNELS_CONV, dtype=self.xp.float32)
-        self.layer_conv.running_var = self.xp.ones(self.NUM_CHANNELS_CONV, dtype=self.xp.float32)
+                # Reset parameters and running statistics to identical initial state
+                layer.running_mean = self.xp.zeros(C, dtype=self.xp.float32)
+                layer.running_var = self.xp.ones(C, dtype=self.xp.float32)
 
-        # Execute GPU path
-        out_gpu = self.layer_conv._forward_gpu(self.conv_inputs, training=True)
+                # Execute GPU path
+                out_gpu = layer._forward_gpu(inputs, training=True)
 
-        self.assertTrue(self.xp.allclose(out_gpu, out_fallback, atol=1e-4, rtol=1e-4))
-        self.assertTrue(self.xp.allclose(self.layer_conv.batch_mean, mean_fallback.squeeze(), atol=1e-4, rtol=1e-4))
-        self.assertTrue(self.xp.allclose(self.layer_conv.batch_var, var_fallback.squeeze(), atol=1e-4, rtol=1e-4))
-        self.assertTrue(self.xp.allclose(self.layer_conv.running_mean, running_mean_fallback, atol=1e-4, rtol=1e-4))
-        self.assertTrue(self.xp.allclose(self.layer_conv.running_var, running_var_fallback, atol=1e-4, rtol=1e-4))
+                self.assertTrue(self.xp.allclose(out_gpu, out_fallback, atol=1e-4, rtol=1e-4))
+                self.assertTrue(self.xp.allclose(layer.batch_mean, mean_fallback.squeeze(), atol=1e-4, rtol=1e-4))
+                self.assertTrue(self.xp.allclose(layer.batch_var, var_fallback.squeeze(), atol=1e-4, rtol=1e-4))
+                self.assertTrue(self.xp.allclose(layer.running_mean, running_mean_fallback, atol=1e-4, rtol=1e-4))
+                self.assertTrue(self.xp.allclose(layer.running_var, running_var_fallback, atol=1e-4, rtol=1e-4))
 
     def test_gpu_forward_inference_parity(self):
         """Verify parity between fallback and GPU forward inference paths."""
@@ -226,11 +245,12 @@ class TestBatchNormLayer(base_case.AetherBaseLayerTestCase):
         if self.backend_name != "cupy":
             self.skipTest("GPU parity test is only applicable on CuPy backend.")
 
-        for layer, inputs, shape in [
-            (self.layer_dense, self.dense_inputs, self.DENSE_SHAPE),
-            (self.layer_conv, self.conv_inputs, self.CONV_SHAPE),
+        for layer, inputs in [
+            (self.layer_dense, self.dense_inputs),
+            (self.layer_conv, self.conv_inputs),
+            self._make_ragged(),
         ]:
-            dvalues = self.xp.random.randn(*shape).astype(self.xp.float32)
+            dvalues = self.xp.random.randn(*inputs.shape).astype(self.xp.float32)
 
             # Fallback path run
             layer._forward_fallback(inputs, training=True)
@@ -242,9 +262,55 @@ class TestBatchNormLayer(base_case.AetherBaseLayerTestCase):
             layer._forward_gpu(inputs, training=True)
             dinputs_gpu = layer._backward_gpu(dvalues)
 
-            self.assertTrue(self.xp.allclose(dinputs_gpu, dinputs_fallback, atol=1e-4, rtol=1e-4))
-            self.assertTrue(self.xp.allclose(layer.dweights, dweights_fallback, atol=1e-4, rtol=1e-4))
-            self.assertTrue(self.xp.allclose(layer.dbiases, dbiases_fallback, atol=1e-4, rtol=1e-4))
+            with self.subTest(shape=inputs.shape):
+                self.assertTrue(self.xp.allclose(dinputs_gpu, dinputs_fallback, atol=1e-4, rtol=1e-4))
+                self.assertTrue(self.xp.allclose(layer.dweights, dweights_fallback, atol=1e-4, rtol=1e-4))
+                self.assertTrue(self.xp.allclose(layer.dbiases, dbiases_fallback, atol=1e-4, rtol=1e-4))
+
+    def test_gpu_training_is_deterministic(self):
+        """The reductions write per-block partials instead of float atomics, so two
+        runs over many blocks give bit-identical statistics, outputs and gradients."""
+        if self.backend_name != "cupy":
+            self.skipTest("GPU determinism test is only applicable on CuPy backend.")
+
+        layer, inputs = self._make_ragged()
+        dvalues = self.xp.random.randn(*inputs.shape).astype(self.xp.float32)
+
+        runs = []
+        for _ in range(2):
+            out = layer._forward_gpu(inputs, training=True)
+            stats = [layer.batch_mean.copy(), layer.batch_var.copy()]
+            dinputs = layer._backward_gpu(dvalues)
+            runs.append([out.copy(), *stats, dinputs.copy(), layer.dweights.copy(), layer.dbiases.copy()])
+
+        for name, first, second in zip(
+            ("output", "batch_mean", "batch_var", "dinputs", "dweights", "dbiases"), *runs
+        ):
+            with self.subTest(name=name):
+                self.assertTrue(self.xp.array_equal(first, second))
+
+    def test_gpu_float64_running_stats(self):
+        """Regression: training on NumPy under a float64 policy leaves the running
+        statistics float64, and Model.to('cupy') keeps that dtype. GPU inference then
+        raised TypeError, and the in-place running-stat update must not misread them."""
+        if self.backend_name != "cupy":
+            self.skipTest("GPU dtype test is only applicable on CuPy backend.")
+
+        layer = self.layer_dense
+        mean64 = self.xp.linspace(-1.0, 1.0, self.NUM_FEATURES_DENSE)
+        var64 = self.xp.linspace(0.5, 2.0, self.NUM_FEATURES_DENSE)
+
+        layer.running_mean, layer.running_var = mean64.copy(), var64.copy()
+        layer._forward_gpu(self.dense_inputs, training=True)
+        expected_mean = 0.9 * mean64 + 0.1 * self.xp.mean(self.dense_inputs, axis=0)
+        expected_var = 0.9 * var64 + 0.1 * self.xp.var(self.dense_inputs, axis=0)
+        self.assertTrue(self.xp.allclose(layer.running_mean, expected_mean, atol=1e-5, rtol=1e-5))
+        self.assertTrue(self.xp.allclose(layer.running_var, expected_var, atol=1e-5, rtol=1e-5))
+
+        layer.running_mean, layer.running_var = mean64.copy(), var64.copy()
+        out = layer._forward_gpu(self.dense_inputs, training=False)
+        expected = (self.dense_inputs - mean64) / self.xp.sqrt(var64 + self.EPSILON)
+        self.assertTrue(self.xp.allclose(out, expected, atol=1e-5, rtol=1e-5))
 
     def test_gpu_non_float32_inputs_match_float32(self):
         """Regression: under set_precision() a Dense before BatchNorm emits fp16/fp64,
@@ -288,6 +354,10 @@ class TestBatchNormLayer(base_case.AetherBaseLayerTestCase):
 
         out = self.layer_conv._forward_gpu(offset_inputs, training=True)
 
+        # E[x^2] - E[x]^2 in fp32 cancels to noise here; the reference is the float64
+        # variance of the same fp32 data.
+        expected_var = self.xp.var(offset_inputs.astype(self.xp.float64), axis=(0, 1, 2))
+        self.assertTrue(self.xp.allclose(self.layer_conv.batch_var, expected_var, atol=0, rtol=1e-4))
         self.assertTrue(self.xp.all(self.layer_conv.batch_var >= 0.0))
         self.assertFalse(self.xp.any(self.xp.isnan(out)))
         self.assertFalse(self.xp.any(self.xp.isinf(out)))

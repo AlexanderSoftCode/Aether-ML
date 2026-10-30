@@ -59,6 +59,7 @@ class BatchNorm(Layer):
         self.inv_std = None
         self.batch_mean = None
         self.batch_var = None
+        self.scale = None
 
         self.weight_regularizer_l1 = 0
         self.weight_regularizer_l2 = 0
@@ -66,8 +67,8 @@ class BatchNorm(Layer):
         self.bias_regularizer_l2 = 0
 
         self._variant = None
-        self._mean_kernel = None
-        self._var_kernel = None
+        self._stats_kernel = None
+        self._forward_finalize_kernel = None
         self._grad_sums_kernel = None
 
         self.forward = self._forward_fallback
@@ -96,17 +97,16 @@ class BatchNorm(Layer):
         grid_y = max(1, min((N + block_y - 1) // block_y, slots // grid_x))
         grid_dim = (grid_x, grid_y, 1)
 
-        static_args = (
-            np.int32(N),
-            np.int32(C),
-        )
-
         meta = {
             "N": N,
             "C": C,
             "block_dim": block_dim,
             "grid_dim": grid_dim,
-            "static_args": static_args,
+            # The finalize kernels reduce the grid_y partials, one block per 32 channels.
+            "finalize_grid_dim": (grid_x, 1, 1),
+            "partials_shape": (2, grid_y, C),
+            "static_args": (np.int32(N), np.int32(C)),
+            "finalize_args": (np.int32(grid_y), np.int32(N), np.int32(C)),
         }
         self._launch_cache[cache_key] = meta
         return meta
@@ -135,25 +135,10 @@ class BatchNorm(Layer):
         if device == "cupy" and config.HAS_CUPY and gpu_bn.is_gpu_bn_available():
             variant, _ = config.resolve_gpu_launch_geometry()
 
-            mean_kernel = gpu_bn.get_bn_mean_kernel(variant)
-            var_kernel = gpu_bn.get_bn_var_kernel(variant)
-            grad_sums_kernel = gpu_bn.get_bn_grad_sums_kernel(variant)
-
-            if (
-                mean_kernel is None
-                or var_kernel is None
-                or grad_sums_kernel is None
-                or gpu_bn._bn_forward_ew is None
-                or gpu_bn._bn_backward_ew is None
-            ):
-                self.forward = self._forward_fallback
-                self.backward = self._backward_fallback
-                return
-
             self._variant = variant
-            self._mean_kernel = mean_kernel
-            self._var_kernel = var_kernel
-            self._grad_sums_kernel = grad_sums_kernel
+            self._stats_kernel = gpu_bn.get_bn_stats_kernel(variant)
+            self._forward_finalize_kernel = gpu_bn.get_bn_forward_finalize_kernel(variant)
+            self._grad_sums_kernel = gpu_bn.get_bn_grad_sums_kernel(variant)
 
             self.forward = self._forward_gpu
             self.backward = self._backward_gpu
@@ -164,65 +149,42 @@ class BatchNorm(Layer):
     def _forward_gpu(self, inputs, training):
         xp = config.cp
         # The kernels read raw float* buffers; a precision policy can hand us
-        # fp16/fp64 from the layer before.
+        # fp16/fp64 from the layer before, and training on NumPy under a float64
+        # policy leaves the running statistics float64.
         inputs = xp.ascontiguousarray(inputs, dtype=xp.float32)
+        self.running_mean = xp.ascontiguousarray(self.running_mean, dtype=xp.float32)
+        self.running_var = xp.ascontiguousarray(self.running_var, dtype=xp.float32)
+        output = xp.empty_like(inputs)
 
         if not training:
-            inv_std = 1.0 / xp.sqrt(self.running_var + self.epsilon)
-            scale = self.gamma * inv_std
-            bias = self.beta - self.running_mean * scale
-
-            output = xp.empty_like(inputs)
-            gpu_bn._bn_inference_ew(inputs, scale, bias, output)
+            scale = self.gamma / xp.sqrt(self.running_var + self.epsilon)
+            gpu_bn._bn_apply_ew(inputs, self.running_mean, scale, self.beta, output)
             return output
 
         meta = self._get_shape_meta(inputs.shape)
-        N = meta["N"]
         C = meta["C"]
+        inputs_flat = inputs.reshape(meta["N"], C)
 
-        inputs_flat = inputs.reshape(N, C)
-        out_mean = xp.zeros((C,), dtype=xp.float32)
-
-        kernel_args = (
-            inputs_flat,
-            None,
-            None,
-            out_mean,
-            None,
-        ) + meta["static_args"]
-        self._mean_kernel(meta["grid_dim"], meta["block_dim"], kernel_args)
-
-        batch_mean = out_mean / float(N)
-
-        out_var = xp.zeros((C,), dtype=xp.float32)
-        kernel_args = (
-            inputs_flat,
-            None,
-            batch_mean,
-            out_var,
-            None,
-        ) + meta["static_args"]
-        self._var_kernel(meta["grid_dim"], meta["block_dim"], kernel_args)
-
-        batch_var = out_var / float(N)
-        inv_std = 1.0 / xp.sqrt(batch_var + self.epsilon)
-
-        # Update running stats
-        self.running_mean = (
-            self.momentum * self.running_mean + (1.0 - self.momentum) * batch_mean
+        partials = xp.empty(meta["partials_shape"], dtype=xp.float32)
+        self._stats_kernel(
+            meta["grid_dim"], meta["block_dim"],
+            (inputs_flat, None, None, partials) + meta["static_args"],
         )
-        self.running_var = (
-            self.momentum * self.running_var + (1.0 - self.momentum) * batch_var
+
+        # Rows: mean, var, inv_std, scale. The running statistics update in place.
+        stats = xp.empty((4, C), dtype=xp.float32)
+        self._forward_finalize_kernel(
+            meta["finalize_grid_dim"], meta["block_dim"],
+            (partials, inputs_flat, self.gamma, stats, self.running_mean, self.running_var)
+            + meta["finalize_args"]
+            + (np.float32(self.epsilon), np.float32(self.momentum)),
         )
 
         # Cache intermediate state
         self.inputs = inputs
-        self.batch_mean = batch_mean
-        self.batch_var = batch_var
-        self.inv_std = inv_std
+        self.batch_mean, self.batch_var, self.inv_std, self.scale = stats
 
-        output = xp.empty_like(inputs)
-        gpu_bn._bn_forward_ew(inputs, batch_mean, inv_std, self.gamma, self.beta, output)
+        gpu_bn._bn_apply_ew(inputs, self.batch_mean, self.scale, self.beta, output)
         return output
 
     def _backward_gpu(self, dvalues):
@@ -236,17 +198,15 @@ class BatchNorm(Layer):
         dvalues_flat = dvalues.reshape(N, C)
         inputs_flat = self.inputs.reshape(N, C)
 
-        dbeta = xp.zeros((C,), dtype=xp.float32)
-        diff_sum = xp.zeros((C,), dtype=xp.float32)
-
+        partials = xp.empty(meta["partials_shape"], dtype=xp.float32)
         kernel_args = (
             dvalues_flat,
             inputs_flat,
             self.batch_mean,
-            dbeta,
-            diff_sum,
+            partials,
         ) + meta["static_args"]
         self._grad_sums_kernel(meta["grid_dim"], meta["block_dim"], kernel_args)
+        dbeta, diff_sum = partials.sum(axis=1)
 
         inv_std = self.inv_std
         gamma = self.gamma

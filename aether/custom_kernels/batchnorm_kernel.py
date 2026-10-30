@@ -5,155 +5,189 @@ import aether.config as config
 BLOCK_Y = 8
 
 
-_STATS_REDUCE_TEMPLATE = Template(r'''
+# Shared by every kernel below: sums each thread's (a, b) pair over the block's
+# BLOCK_Y rows. Returns true on the threads of row 0 that hold a channel's total.
+_PRELUDE = r'''
 $hip_include
 #define WAVEFRONT 32
 #define BLOCK_Y   $block_y
 
+__device__ __forceinline__ bool block_sum(float& a, float& b, int c, int C) {
+    __shared__ float sh_a[BLOCK_Y][WAVEFRONT];
+    __shared__ float sh_b[BLOCK_Y][WAVEFRONT];
+
+    sh_a[threadIdx.y][threadIdx.x] = a;
+    sh_b[threadIdx.y][threadIdx.x] = b;
+    __syncthreads();
+
+    if (threadIdx.y != 0 || c >= C) return false;
+    a = 0.0f;
+    b = 0.0f;
+    for (int j = 0; j < BLOCK_Y; ++j) {
+        a += sh_a[j][threadIdx.x];
+        b += sh_b[j][threadIdx.x];
+    }
+    return true;
+}
+'''
+
+# Each block reduces its rows of [N, C] and writes one (a, b) pair per channel to
+# partials[2, gridDim.y, C]. No atomics, so the result is deterministic.
+_STATS_REDUCE_TEMPLATE = Template(_PRELUDE + r'''
 extern "C" __global__
 void $kernel_name(
     const float* __restrict__ p,
     const float* __restrict__ q,      // unused (nullptr) ops still take the param
     const float* __restrict__ mean,   // channel mean [C], unused ops pass nullptr
-    float* __restrict__ out_a,        // [C], caller must zero-init
-    float* __restrict__ out_b,        // [C], caller must zero-init
+    float* __restrict__ partials,     // [2, gridDim.y, C]
     const int N,
     const int C
 ) {
-    __shared__ float sh_a[BLOCK_Y][WAVEFRONT];
-    __shared__ float sh_b[BLOCK_Y][WAVEFRONT];
-
-    int c  = blockIdx.x * WAVEFRONT + threadIdx.x;
-    int ty = threadIdx.y;
+    int c = blockIdx.x * WAVEFRONT + threadIdx.x;
 
     float acc_a = 0.0f;
     float acc_b = 0.0f;
 
     if (c < C) {
-        $mean_load
-        for (int n = blockIdx.y * BLOCK_Y + ty; n < N; n += gridDim.y * BLOCK_Y) {
+        $prologue
+        for (int n = blockIdx.y * BLOCK_Y + threadIdx.y; n < N; n += gridDim.y * BLOCK_Y) {
             int idx = n * C + c;
-            float val_p = p[idx];
-            $load_q
-            acc_a += $accum_a_expr;
-            $accum_b_stmt
+            $accumulate
         }
     }
 
-    sh_a[ty][threadIdx.x] = acc_a;
-    sh_b[ty][threadIdx.x] = acc_b;
-    __syncthreads();
+    if (!block_sum(acc_a, acc_b, c, C)) return;
+    partials[blockIdx.y * C + c] = acc_a;
+    partials[(gridDim.y + blockIdx.y) * C + c] = acc_b;
+}
+''')
 
-    if (ty == 0 && c < C) {
-        float block_a = 0.0f;
-        float block_b = 0.0f;
-        for (int j = 0; j < BLOCK_Y; ++j) {
-            block_a += sh_a[j][threadIdx.x];
-            block_b += sh_b[j][threadIdx.x];
+# Reduces the stats partials and finishes the per-channel math in one launch:
+# stats[4, C] = (mean, var, inv_std, scale = gamma * inv_std), and the running
+# statistics are updated in place.
+_FORWARD_FINALIZE_TEMPLATE = Template(_PRELUDE + r'''
+extern "C" __global__
+void $kernel_name(
+    const float* __restrict__ partials,   // [2, G, C] sums of d = x - x[0, c] and d * d
+    const float* __restrict__ x,          // [N, C], row 0 is the shift
+    const float* __restrict__ gamma,
+    float* __restrict__ stats,            // [4, C]
+    float* __restrict__ running_mean,
+    float* __restrict__ running_var,
+    const int G,
+    const int N,
+    const int C,
+    const float eps,
+    const float momentum
+) {
+    int c = blockIdx.x * WAVEFRONT + threadIdx.x;
+
+    float s1 = 0.0f;
+    float s2 = 0.0f;
+    if (c < C) {
+        for (int g = threadIdx.y; g < G; g += BLOCK_Y) {
+            s1 += partials[g * C + c];
+            s2 += partials[(G + g) * C + c];
         }
-        atomicAdd(&out_a[c], block_a);
-        $writeback_b
     }
+
+    if (!block_sum(s1, s2, c, C)) return;
+    float d_mean = s1 / N;
+    float mean = x[c] + d_mean;
+    float var = fmaxf(s2 / N - d_mean * d_mean, 0.0f);
+    float inv_std = 1.0f / sqrtf(var + eps);
+
+    stats[c] = mean;
+    stats[C + c] = var;
+    stats[2 * C + c] = inv_std;
+    stats[3 * C + c] = gamma[c] * inv_std;
+
+    running_mean[c] = momentum * running_mean[c] + (1.0f - momentum) * mean;
+    running_var[c] = momentum * running_var[c] + (1.0f - momentum) * var;
 }
 ''')
 
 _BN_CUDA = dict(hip_include="")
 _BN_HIP = dict(hip_include="#include <hip/hip_runtime.h>\n")
 
-_MEAN_OP = {
-    "name": "mean",
-    "mean_load": "",
-    "load_q": "",
-    "accum_a_expr": "val_p",
-    "accum_b_stmt": "",
-    "writeback_b": "",
-}
-
-_VAR_OP = {
-    "name": "var",
-    "mean_load": "float mu = mean[c];",
-    "load_q": "",
-    "accum_a_expr": "(val_p - mu) * (val_p - mu)",
-    "accum_b_stmt": "",
-    "writeback_b": "",
+# Shifting by a sample of the channel keeps the one-pass variance from cancelling
+# when |mean| >> std, without the per-element divide Welford needs.
+_STATS_OP = {
+    "name": "stats",
+    "template": _STATS_REDUCE_TEMPLATE,
+    "prologue": "float k = p[c];",
+    "accumulate": "float d = p[idx] - k; acc_a += d; acc_b += d * d;",
 }
 
 _GRAD_SUMS_OP = {
     "name": "grad_sums",
-    "mean_load": "float mu = mean[c];",
-    "load_q": "float val_q = q[idx];",
-    "accum_a_expr": "val_p",
-    "accum_b_stmt": "acc_b += val_p * (val_q - mu);",
-    "writeback_b": "atomicAdd(&out_b[c], block_b);",
+    "template": _STATS_REDUCE_TEMPLATE,
+    "prologue": "float mu = mean[c];",
+    "accumulate": "float g = p[idx]; acc_a += g; acc_b += g * (q[idx] - mu);",
 }
 
-_bn_reduce_kernel_cache = {}
+_FORWARD_FINALIZE_OP = {
+    "name": "forward_finalize",
+    "template": _FORWARD_FINALIZE_TEMPLATE,
+}
+
+_bn_kernel_cache = {}
 
 
-def _get_compiled_reduce_kernel(op_dict: dict, variant: str, block_y: int = BLOCK_Y):
-    """Cached, compiled reduction RawKernel for the given vendor variant.
+def _get_compiled_kernel(op_dict: dict, variant: str, block_y: int = BLOCK_Y):
+    """Cached, compiled RawKernel for the given vendor variant.
 
     Memoized by (op_name, variant) without baking shapes into the compile key.
     """
     key = (op_dict["name"], variant)
-    if key in _bn_reduce_kernel_cache:
-        return _bn_reduce_kernel_cache[key]
+    if key in _bn_kernel_cache:
+        return _bn_kernel_cache[key]
 
     vendor = _BN_HIP if variant == "hip" else _BN_CUDA
     op_name = op_dict["name"]
-    kernel_name = f"bn_reduce_{op_name}_{variant}_kernel"
-    source = _STATS_REDUCE_TEMPLATE.substitute(
+    kernel_name = f"bn_{op_name}_{variant}_kernel"
+    source = op_dict["template"].substitute(
         kernel_name=kernel_name,
         block_y=block_y,
-        mean_load=op_dict["mean_load"],
-        load_q=op_dict["load_q"],
-        accum_a_expr=op_dict["accum_a_expr"],
-        accum_b_stmt=op_dict["accum_b_stmt"],
-        writeback_b=op_dict["writeback_b"],
+        prologue=op_dict.get("prologue", ""),
+        accumulate=op_dict.get("accumulate", ""),
         **vendor,
     )
 
     kernel = config.build_kernel(
         lambda: config.cp.RawKernel(source, kernel_name),
-        name=f"bn_reduce_{op_name}_{variant}",
+        name=f"bn_{op_name}_{variant}",
     )
-    _bn_reduce_kernel_cache[key] = kernel
+    _bn_kernel_cache[key] = kernel
     return kernel
 
-def get_bn_mean_kernel(variant: str):
-    """Returns a compiled RawKernel for BatchNorm FP32 mean reduction."""
-    return _get_compiled_reduce_kernel(_MEAN_OP, variant)
+
+def get_bn_stats_kernel(variant: str):
+    """Returns a compiled RawKernel for the BatchNorm FP32 shifted sum / sum-of-squares partials."""
+    return _get_compiled_kernel(_STATS_OP, variant)
 
 
-def get_bn_var_kernel(variant: str):
-    """Returns a compiled RawKernel for BatchNorm FP32 centered variance reduction."""
-    return _get_compiled_reduce_kernel(_VAR_OP, variant)
+def get_bn_forward_finalize_kernel(variant: str):
+    """Returns a compiled RawKernel that turns the stats partials into mean, var, inv_std and scale."""
+    return _get_compiled_kernel(_FORWARD_FINALIZE_OP, variant)
 
 
 def get_bn_grad_sums_kernel(variant: str):
-    """Returns a compiled RawKernel for BatchNorm FP32 gradient sums reduction."""
-    return _get_compiled_reduce_kernel(_GRAD_SUMS_OP, variant)
+    """Returns a compiled RawKernel for BatchNorm FP32 gradient sums partials."""
+    return _get_compiled_kernel(_GRAD_SUMS_OP, variant)
 
-# --- Elementwise Finalize Kernels -----------------------------------------------
+# --- Elementwise Kernels --------------------------------------------------------
 
-_bn_forward_ew = config.build_kernel(
+# Training and inference share it: the centered form keeps the rounding error of
+# folding (mean, scale, beta) into one bias out of the output.
+_bn_apply_ew = config.build_kernel(
     lambda: config.cp.ElementwiseKernel(
-        'float32 x, float32 mean, float32 inv_std, float32 gamma, float32 beta',
+        'float32 x, float32 mean, float32 scale, float32 beta',
         'float32 out',
-        'out = (x - mean) * inv_std * gamma + beta;',
-        'bn_forward_ew',
+        'out = fmaf(x - mean, scale, beta);',
+        'bn_apply_ew',
     ),
-    name='_bn_forward_ew',
-)
-
-_bn_inference_ew = config.build_kernel(
-    lambda: config.cp.ElementwiseKernel(
-        'float32 x, float32 scale, float32 bias',
-        'float32 out',
-        'out = x * scale + bias;',
-        'bn_inference_ew',
-    ),
-    name='_bn_inference_ew',
+    name='_bn_apply_ew',
 )
 
 _bn_backward_ew = config.build_kernel(
@@ -174,14 +208,10 @@ def is_gpu_bn_available(variant: str = None) -> bool:
     if variant is None:
         variant, _ = config.resolve_gpu_launch_geometry()
 
-    mean_k = get_bn_mean_kernel(variant)
-    var_k = get_bn_var_kernel(variant)
-    grad_sums_k = get_bn_grad_sums_kernel(variant)
     return (
-        mean_k is not None
-        and var_k is not None
-        and grad_sums_k is not None
-        and _bn_forward_ew is not None
-        and _bn_inference_ew is not None
+        get_bn_stats_kernel(variant) is not None
+        and get_bn_forward_finalize_kernel(variant) is not None
+        and get_bn_grad_sums_kernel(variant) is not None
+        and _bn_apply_ew is not None
         and _bn_backward_ew is not None
     )
