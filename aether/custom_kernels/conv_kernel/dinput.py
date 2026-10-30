@@ -47,6 +47,14 @@ $hip_include
 #define WARP_SIZE $warp_size
 #define THREADS (WARPS_M * WARPS_N * WARP_SIZE)
 
+// 16-byte staging of A (dvalues): a lane moves 8 consecutive c_out (one
+// uint4) of one tap when C_OUT keeps every 8-aligned k chunk inside one tap.
+// Otherwise A is staged one element per lane.
+#define VEC 8
+#define VEC_A ($vectorize && C_OUT % VEC == 0)
+#define A_VEC_THREADS (BLOCK_TILE_M * WMMA_K / VEC)
+static_assert(A_VEC_THREADS <= THREADS, "vector staging needs a lane per A chunk");
+
 // Trip count of the A staging loop. Each lane keeps one hoisted addressing
 // triple per pass, so this has to be a compile-time constant.
 #define A_PASSES ((BLOCK_TILE_M * WMMA_K + THREADS - 1) / THREADS)
@@ -93,14 +101,29 @@ extern "C" __global__ void __launch_bounds__(THREADS) conv_backward_dinput_wmma(
     const bool warp_live = warp_row < WARPS_M && warp_col < WARPS_N
                         && n_tile_start + warp_col * WMMA_N < C_IN;
 
-    __shared__ half As[BLOCK_TILE_M][WMMA_K + 8];
-    __shared__ half Bs[WMMA_K][BLOCK_TILE_N + 8];
+    __shared__ alignas(32) half As[BLOCK_TILE_M][WMMA_K + 8];
+    __shared__ alignas(32) half Bs[WMMA_K][BLOCK_TILE_N + 8];
 
     fragment<$matrix_a_tag, WMMA_M, WMMA_N, WMMA_K, half, $frag_layout_a> a_frag;
     fragment<$matrix_b_tag, WMMA_M, WMMA_N, WMMA_K, half, $frag_layout_b> b_frag;
     fragment<$accumulator_tag, WMMA_M, WMMA_N, WMMA_K, float> acc_frag;
     fill_fragment(acc_frag, 0.0f);
 
+#if VEC_A
+    // A lane's pixel is fixed for the whole K loop, so decompose it once.
+    const bool a_lane = threadIdx.x < A_VEC_THREADS;
+    const int a_m  = threadIdx.x / (WMMA_K / VEC);
+    const int a_k8 = (threadIdx.x % (WMMA_K / VEC)) * VEC;
+    const long long a_m_global = m_tile_start + a_m;
+    const bool a_valid = a_lane && a_m_global < M_class;
+    int a_s = 0, a_hob = 0, a_wob = 0;
+    if (a_valid) {
+        a_s = (int)(a_m_global / HW_CLASS);
+        const int rem = (int)(a_m_global % HW_CLASS);
+        a_hob = base_qh + rem / NW;
+        a_wob = base_qw + rem % NW;
+    }
+#else
     int a_local_m[A_PASSES];
     int a_valid[A_PASSES];
     int a_s[A_PASSES];
@@ -125,11 +148,38 @@ extern "C" __global__ void __launch_bounds__(THREADS) conv_backward_dinput_wmma(
             a_wob[p] = base_qw + rem % NW;
         }
     }
+#endif
 
     const int num_k_tiles = (K_GATHER + WMMA_K - 1) / WMMA_K;
 
     for (int kt = 0; kt < num_k_tiles; ++kt) {
 
+#if VEC_A
+        if (a_lane) {
+            // K_GATHER is a multiple of 8, so the chunk is all in range or all out.
+            const int k_global = kt * WMMA_K + a_k8;
+            uint4 val = {0u, 0u, 0u, 0u};
+            if (a_valid && k_global < K_GATHER) {
+                const int c_out = k_global % C_OUT;
+                const int t_w   = (k_global / C_OUT) % TAPS_W;
+                const int t_h   = k_global / C_OUT_TAPSW;
+
+                const int fh    = r_h + t_h * STR_H;
+                const int fw    = r_w + t_w * STR_W;
+                const int h_out = a_hob - t_h;
+                const int w_out = a_wob - t_w;
+
+                if (fh < F_H && fw < F_W &&
+                    h_out >= 0 && h_out < H_OUT &&
+                    w_out >= 0 && w_out < W_OUT) {
+                    const long long dv_idx =
+                        (((long long)a_s * H_OUT + h_out) * W_OUT + w_out) * C_OUT + c_out;
+                    val = *reinterpret_cast<const uint4*>(&dvalues[dv_idx]);
+                }
+            }
+            *reinterpret_cast<uint4*>(&As[a_m][a_k8]) = val;
+        }
+#else
         #pragma unroll
         for (int p = 0; p < A_PASSES; ++p) {
             const int idx = threadIdx.x + p * THREADS;
@@ -159,6 +209,7 @@ extern "C" __global__ void __launch_bounds__(THREADS) conv_backward_dinput_wmma(
             }
             As[a_local_m[p]][local_k] = val;
         }
+#endif
 
         for (int idx = threadIdx.x; idx < WMMA_K * BLOCK_TILE_N; idx += blockDim.x) {
             const int local_k = idx % WMMA_K;
@@ -225,13 +276,10 @@ extern "C" __global__ void __launch_bounds__(THREADS) conv_backward_dinput_wmma(
 _CONV_BACKWARD_DINPUT_CACHE = {}
 
 
-def get_compiled_backward_dinput_kernel(shape_meta: ConvShapeMeta):
-    key = shape_meta.cache_key
-    if key in _CONV_BACKWARD_DINPUT_CACHE:
-        return _CONV_BACKWARD_DINPUT_CACHE[key]
-
+def render_dinput_source(shape_meta: ConvShapeMeta, vectorize=True):
+    """CUDA/HIP source for one shape. vectorize=False forces the scalar staging."""
     vendor = _CONV_HIP if shape_meta.is_hip else _CONV_CUDA
-    source = CNN_BACKWARD_DINPUT_TEMPLATE.substitute(
+    return CNN_BACKWARD_DINPUT_TEMPLATE.substitute(
         c_in=shape_meta.C_in, c_out=shape_meta.C_out,
         f_h=shape_meta.fH, f_w=shape_meta.fW,
         str_h=shape_meta.sH, str_w=shape_meta.sW,
@@ -240,8 +288,18 @@ def get_compiled_backward_dinput_kernel(shape_meta: ConvShapeMeta):
         h_out=shape_meta.H_out, w_out=shape_meta.W_out,
         wmma_dim=_WMMA_DIM,
         block_tile_m=_BLOCK_TILE_M, block_tile_n=_BLOCK_TILE_N,
+        vectorize=int(bool(vectorize)),
         **vendor,
     )
+
+
+def get_compiled_backward_dinput_kernel(shape_meta: ConvShapeMeta):
+    key = shape_meta.cache_key
+    if key in _CONV_BACKWARD_DINPUT_CACHE:
+        return _CONV_BACKWARD_DINPUT_CACHE[key]
+
+    vendor = _CONV_HIP if shape_meta.is_hip else _CONV_CUDA
+    source = render_dinput_source(shape_meta)
 
     try:
         module = config.cp.RawModule(code=source, options=_COMPILE_OPTIONS)

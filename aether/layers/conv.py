@@ -254,7 +254,11 @@ class Conv2d(Layer):
             self.backward = self._backward_fallback
             return self._forward_fallback(inputs, training)
 
-        inputs_fp16 = inputs.astype(xp.float16, copy=False)
+        inputs_fp16 = xp.ascontiguousarray(inputs, dtype=xp.float16)
+        # The kernel stages 16-byte vectors; a fresh allocation is aligned, a
+        # view into one (e.g. an fp16 slice) may not be.
+        if inputs_fp16.data.ptr % 16:
+            inputs_fp16 = inputs_fp16.copy()
 
         if not self._fp16_weight_valid:
             self._refresh_fp16_weights(xp)
