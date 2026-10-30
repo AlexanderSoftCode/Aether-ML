@@ -239,9 +239,12 @@ class TestConvBackward(ConvLayerTestBase):
         self.layer.needs_input_grad = False
         self.assertIsNone(self.layer.backward(dvalues))
         self.assertIsNone(self.layer.dinputs)
-        # GPU dW accumulates split-K slices with atomics, so summation order varies run to run.
-        self.xp.testing.assert_allclose(self.layer.dweights, expected_dw, rtol=1e-5)
-        self.xp.testing.assert_allclose(self.layer.dbiases, expected_db, rtol=1e-5)
+        # GPU dW/dB accumulate split-K slices with atomics, so summation order
+        # varies run to run. Compare against the tensor's scale, not per
+        # element: an entry that cancels to near zero still carries the
+        # rounding of its O(10) partial sums, which a plain rtol rejects.
+        self._assert_gemm_close(self.layer.dweights, expected_dw, "dweights", tol=1e-5)
+        self._assert_gemm_close(self.layer.dbiases, expected_db, "dbiases", tol=1e-5)
 
 
 base_case.register_test_suites(globals(), TestConvBackward)
