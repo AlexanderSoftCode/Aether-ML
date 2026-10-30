@@ -4,7 +4,6 @@ from string import Template
 import aether.config as config
 from aether.custom_kernels.conv_kernel.common import (
     _BLOCK_TILE_M,
-    _BLOCK_TILE_N,
     _COMPILE_OPTIONS,
     _CONV_CUDA,
     _CONV_HIP,
@@ -12,6 +11,8 @@ from aether.custom_kernels.conv_kernel.common import (
     ConvLaunchPlan,
     ConvShapeMeta,
     _m_total,
+    choose_block_tile_n,
+    threads_per_block,
 )
 
 # --- Forward Template -------------------------------------------------------
@@ -224,9 +225,14 @@ extern "C" __global__ void conv_forward_wmma(
 _CONV_FORWARD_KERNEL_CACHE = {}
 
 
+def _forward_tiles(shape_meta: ConvShapeMeta):
+    return _BLOCK_TILE_M, choose_block_tile_n(shape_meta.C_out)
+
+
 def render_forward_source(shape_meta: ConvShapeMeta, vectorize=True):
     """CUDA/HIP source for one shape. vectorize=False forces the scalar staging."""
     vendor = _CONV_HIP if shape_meta.is_hip else _CONV_CUDA
+    block_tile_m, block_tile_n = _forward_tiles(shape_meta)
     return CNN_FORWARD_TEMPLATE.substitute(
         c_in=shape_meta.C_in, c_out=shape_meta.C_out,
         f_h=shape_meta.fH, f_w=shape_meta.fW,
@@ -235,7 +241,7 @@ def render_forward_source(shape_meta: ConvShapeMeta, vectorize=True):
         h_in=shape_meta.H_in, w_in=shape_meta.W_in,
         h_out=shape_meta.H_out, w_out=shape_meta.W_out,
         wmma_dim=_WMMA_DIM,
-        block_tile_m=_BLOCK_TILE_M, block_tile_n=_BLOCK_TILE_N,
+        block_tile_m=block_tile_m, block_tile_n=block_tile_n,
         vectorize=int(bool(vectorize)),
         **vendor,
     )
@@ -246,7 +252,6 @@ def get_compiled_forward_conv_kernel(shape_meta: ConvShapeMeta):
     if key in _CONV_FORWARD_KERNEL_CACHE:
         return _CONV_FORWARD_KERNEL_CACHE[key]
 
-    vendor = _CONV_HIP if shape_meta.is_hip else _CONV_CUDA
     source = render_forward_source(shape_meta)
 
     try:
@@ -261,11 +266,11 @@ def get_compiled_forward_conv_kernel(shape_meta: ConvShapeMeta):
         _CONV_FORWARD_KERNEL_CACHE[key] = None
         return None
 
-    threads_per_block = (_BLOCK_TILE_M // _WMMA_DIM) * (_BLOCK_TILE_N // _WMMA_DIM) * vendor['warp_size']
+    block_tile_m, block_tile_n = _forward_tiles(shape_meta)
     launch_meta = dict(
-        block=(threads_per_block,),
-        block_tile_m=_BLOCK_TILE_M,
-        block_tile_n=_BLOCK_TILE_N,
+        block=(threads_per_block(block_tile_m, block_tile_n),),
+        block_tile_m=block_tile_m,
+        block_tile_n=block_tile_n,
     )
 
     _CONV_FORWARD_KERNEL_CACHE[key] = (kernel, launch_meta)

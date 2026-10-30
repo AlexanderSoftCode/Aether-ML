@@ -86,6 +86,20 @@ _BLOCK_TILE_N = 64
 _WMMA_DIM = 16
 _WARP_SIZE = 32
 
+
+def choose_block_tile_n(n):
+    """Block tile width on the GEMM N axis (C_out, or C_in for dinput).
+
+    A 64-wide tile on a 32-channel layer leaves half its warps empty, and
+    every thread still stages the half-zero tile; 32 halves the block instead.
+    """
+    return 32 if n <= 32 else _BLOCK_TILE_N
+
+
+def threads_per_block(block_tile_m, block_tile_n):
+    """One warp per 16x16 output fragment of the block tile."""
+    return (block_tile_m // _WMMA_DIM) * (block_tile_n // _WMMA_DIM) * _WARP_SIZE
+
 # RawModule options shared by every conv kernel. No -I for ROCm: hiprtc already
 # searches its own install's include dir (where rocWMMA lives), and a -I from
 # ROCM_PATH would be searched first, so a stale ROCM_PATH could shadow it.

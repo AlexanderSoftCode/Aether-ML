@@ -14,6 +14,7 @@ from aether.custom_kernels.conv_kernel.cast import (
 from aether.custom_kernels.conv_kernel.common import (
     ConvLaunchPlan,
     ConvShapeMeta,
+    choose_block_tile_n,
     get_is_conv_gpu_available,
 )
 from aether.custom_kernels.conv_kernel.dinput import (
@@ -41,6 +42,7 @@ __all__ = [
     "ConvLaunchPlan",
     "ConvShapeMeta",
     "cast_backward_operands_fp16",
+    "choose_block_tile_n",
     "choose_dweight_split_k",
     "get_compiled_backward_cast_kernel",
     "get_compiled_backward_dinput_kernel",
