@@ -312,8 +312,9 @@ class Model:
             RuntimeError: If called after `finalize()`.
         Note:
             NumPy runs are bit-reproducible. CuPy runs are not bit-identical,
-            because the BatchNorm and Conv2d gradient kernels accumulate with
-            float `atomicAdd`, whose ordering varies between runs.
+            because the Conv2d gradient kernels (and MaxPool2d's backward with
+            overlapping windows) accumulate with float atomics, whose ordering
+            varies between runs.
         """
         if self.is_finalized:
             raise RuntimeError("Cannot set a new seed after finalize() has been called.")

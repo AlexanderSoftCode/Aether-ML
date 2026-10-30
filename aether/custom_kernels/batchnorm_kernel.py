@@ -5,8 +5,9 @@ import aether.config as config
 BLOCK_Y = 8
 
 
-# Shared by every kernel below: sums each thread's (a, b) pair over the block's
-# BLOCK_Y rows. Returns true on the threads of row 0 that hold a channel's total.
+# Shared by every kernel below. block_sum adds each thread's (a, b) pair over the
+# block's BLOCK_Y rows and returns true on the row-0 threads that hold a channel's
+# total; sum_partials does the same over the G rows of a partials[2, G, C] buffer.
 _PRELUDE = r'''
 $hip_include
 #define WAVEFRONT 32
@@ -28,6 +29,20 @@ __device__ __forceinline__ bool block_sum(float& a, float& b, int c, int C) {
         b += sh_b[j][threadIdx.x];
     }
     return true;
+}
+
+__device__ __forceinline__ bool sum_partials(
+    const float* __restrict__ partials, int G, int c, int C, float& a, float& b
+) {
+    a = 0.0f;
+    b = 0.0f;
+    if (c < C) {
+        for (int g = threadIdx.y; g < G; g += BLOCK_Y) {
+            a += partials[g * C + c];
+            b += partials[(G + g) * C + c];
+        }
+    }
+    return block_sum(a, b, c, C);
 }
 '''
 
@@ -81,17 +96,9 @@ void $kernel_name(
     const float momentum
 ) {
     int c = blockIdx.x * WAVEFRONT + threadIdx.x;
+    float s1, s2;
+    if (!sum_partials(partials, G, c, C, s1, s2)) return;
 
-    float s1 = 0.0f;
-    float s2 = 0.0f;
-    if (c < C) {
-        for (int g = threadIdx.y; g < G; g += BLOCK_Y) {
-            s1 += partials[g * C + c];
-            s2 += partials[(G + g) * C + c];
-        }
-    }
-
-    if (!block_sum(s1, s2, c, C)) return;
     float d_mean = s1 / N;
     float mean = x[c] + d_mean;
     float var = fmaxf(s2 / N - d_mean * d_mean, 0.0f);
@@ -104,6 +111,33 @@ void $kernel_name(
 
     running_mean[c] = momentum * running_mean[c] + (1.0f - momentum) * mean;
     running_var[c] = momentum * running_var[c] + (1.0f - momentum) * var;
+}
+''')
+
+# Reduces the grad_sums partials into grads[4, C] = (dgamma, dbeta, k1, k2), so
+# that dx = dy * scale + (x - mean) * k1 + k2.
+_BACKWARD_FINALIZE_TEMPLATE = Template(_PRELUDE + r'''
+extern "C" __global__
+void $kernel_name(
+    const float* __restrict__ partials,   // [2, G, C] sums of dy and dy * (x - mean)
+    const float* __restrict__ inv_std,
+    const float* __restrict__ scale,
+    float* __restrict__ grads,            // [4, C]
+    const int G,
+    const int N,
+    const int C
+) {
+    int c = blockIdx.x * WAVEFRONT + threadIdx.x;
+    float s1, s2;
+    if (!sum_partials(partials, G, c, C, s1, s2)) return;
+
+    float is = inv_std[c];
+    float sc = scale[c];
+
+    grads[c] = is * s2;
+    grads[C + c] = s1;
+    grads[2 * C + c] = -sc * is * is * s2 / N;
+    grads[3 * C + c] = -sc * s1 / N;
 }
 ''')
 
@@ -129,6 +163,11 @@ _GRAD_SUMS_OP = {
 _FORWARD_FINALIZE_OP = {
     "name": "forward_finalize",
     "template": _FORWARD_FINALIZE_TEMPLATE,
+}
+
+_BACKWARD_FINALIZE_OP = {
+    "name": "backward_finalize",
+    "template": _BACKWARD_FINALIZE_TEMPLATE,
 }
 
 _bn_kernel_cache = {}
@@ -176,6 +215,11 @@ def get_bn_grad_sums_kernel(variant: str):
     """Returns a compiled RawKernel for BatchNorm FP32 gradient sums partials."""
     return _get_compiled_kernel(_GRAD_SUMS_OP, variant)
 
+
+def get_bn_backward_finalize_kernel(variant: str):
+    """Returns a compiled RawKernel that turns the gradient partials into dgamma, dbeta and the dx coefficients."""
+    return _get_compiled_kernel(_BACKWARD_FINALIZE_OP, variant)
+
 # --- Elementwise Kernels --------------------------------------------------------
 
 # Training and inference share it: the centered form keeps the rounding error of
@@ -192,9 +236,9 @@ _bn_apply_ew = config.build_kernel(
 
 _bn_backward_ew = config.build_kernel(
     lambda: config.cp.ElementwiseKernel(
-        'float32 dvalues, float32 x, float32 mean, float32 gamma_inv_std, float32 dvar_scaled, float32 dmu_over_n',
+        'float32 dvalues, float32 x, float32 mean, float32 scale, float32 k1, float32 k2',
         'float32 dinputs',
-        'dinputs = dvalues * gamma_inv_std + (x - mean) * dvar_scaled + dmu_over_n;',
+        'dinputs = dvalues * scale + (x - mean) * k1 + k2;',
         'bn_backward_ew',
     ),
     name='_bn_backward_ew',
@@ -212,6 +256,7 @@ def is_gpu_bn_available(variant: str = None) -> bool:
         get_bn_stats_kernel(variant) is not None
         and get_bn_forward_finalize_kernel(variant) is not None
         and get_bn_grad_sums_kernel(variant) is not None
+        and get_bn_backward_finalize_kernel(variant) is not None
         and _bn_apply_ew is not None
         and _bn_backward_ew is not None
     )

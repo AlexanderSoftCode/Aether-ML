@@ -70,6 +70,7 @@ class BatchNorm(Layer):
         self._stats_kernel = None
         self._forward_finalize_kernel = None
         self._grad_sums_kernel = None
+        self._backward_finalize_kernel = None
 
         self.forward = self._forward_fallback
         self.backward = self._backward_fallback
@@ -139,6 +140,7 @@ class BatchNorm(Layer):
             self._stats_kernel = gpu_bn.get_bn_stats_kernel(variant)
             self._forward_finalize_kernel = gpu_bn.get_bn_forward_finalize_kernel(variant)
             self._grad_sums_kernel = gpu_bn.get_bn_grad_sums_kernel(variant)
+            self._backward_finalize_kernel = gpu_bn.get_bn_backward_finalize_kernel(variant)
 
             self.forward = self._forward_gpu
             self.backward = self._backward_gpu
@@ -195,42 +197,24 @@ class BatchNorm(Layer):
         N = meta["N"]
         C = meta["C"]
 
-        dvalues_flat = dvalues.reshape(N, C)
-        inputs_flat = self.inputs.reshape(N, C)
-
         partials = xp.empty(meta["partials_shape"], dtype=xp.float32)
-        kernel_args = (
-            dvalues_flat,
-            inputs_flat,
-            self.batch_mean,
-            partials,
-        ) + meta["static_args"]
-        self._grad_sums_kernel(meta["grid_dim"], meta["block_dim"], kernel_args)
-        dbeta, diff_sum = partials.sum(axis=1)
+        self._grad_sums_kernel(
+            meta["grid_dim"], meta["block_dim"],
+            (dvalues.reshape(N, C), self.inputs.reshape(N, C), self.batch_mean, partials)
+            + meta["static_args"],
+        )
 
-        inv_std = self.inv_std
-        gamma = self.gamma
-
-        dgamma = inv_std * diff_sum
-        dvar = gamma * diff_sum * (-0.5) * (inv_std**3)
-        dmu = -inv_std * gamma * dbeta
-
-        self.dbiases = dbeta
-        self.dweights = dgamma
-
-        gamma_inv_std = gamma * inv_std
-        dvar_scaled = dvar * (2.0 / N)
-        dmu_over_n = dmu / float(N)
+        # Rows: dgamma, dbeta, then the dx coefficients k1 and k2.
+        grads = xp.empty((4, C), dtype=xp.float32)
+        self._backward_finalize_kernel(
+            meta["finalize_grid_dim"], meta["block_dim"],
+            (partials, self.inv_std, self.scale, grads) + meta["finalize_args"],
+        )
+        self.dweights, self.dbiases, k1, k2 = grads
 
         self.dinputs = xp.empty_like(dvalues)
         gpu_bn._bn_backward_ew(
-            dvalues,
-            self.inputs,
-            self.batch_mean,
-            gamma_inv_std,
-            dvar_scaled,
-            dmu_over_n,
-            self.dinputs,
+            dvalues, self.inputs, self.batch_mean, self.scale, k1, k2, self.dinputs
         )
         return self.dinputs
 
