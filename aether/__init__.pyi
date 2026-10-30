@@ -5,6 +5,16 @@
 # gets real autocomplete/type info despite the runtime 
 # __getattr__ lazy loading.
 
+"""Aether-ML: a deep learning framework built on NumPy and CuPy, with hand-written
+CUDA and ROCm kernels.
+
+Model, layers, losses, metrics, optimizers and preprocessing transforms are loaded
+lazily on first attribute access, so ``import aether`` stays cheap.
+
+The array backend is selected with ``Model.to()``: ``"numpy"`` runs on the CPU, and
+``"cupy"`` runs on the GPU using the hand-written kernels where the device supports them.
+"""
+
 from aether.layers.activations import LeakyReLU as LeakyReLU
 from aether.layers.activations import ReLU as ReLU
 from aether.layers.activations import SoftMax as SoftMax

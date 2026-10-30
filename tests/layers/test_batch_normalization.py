@@ -1,4 +1,3 @@
-import aether.config as config
 import aether.custom_kernels.relu_kernel as gpu_relu
 import tests.base_case as base_case
 from aether.layers.activations import LeakyReLU, ReLU

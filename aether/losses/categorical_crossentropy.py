@@ -49,7 +49,7 @@ class Loss:
         last_layer = layers[-1]
         if isinstance(last_layer, self.prohibited_preceding_layers):
             prohibited_names = ", ".join(cls.__name__ for cls in self.prohibited_preceding_layers)
-            raise ValueError(
+            raise ValueError(  # noqa: TRY004 - graph errors are a ValueError by contract
                 f"[aether] '{type(self).__name__}' operates directly on unnormalized logits. "
                 f"Do not add an explicit '{prohibited_names}' layer immediately preceding this loss."
             )
@@ -126,7 +126,7 @@ class CategoricalCrossEntropy(Loss):
 
     Notes
     -----
-    - **Expected inputs:**
+    - Expected inputs:
         - ``y_pred``: Probability distributions of shape ``(batch_size, n_classes)``.
           Must already be normalized (e.g., via preceding ``SoftMax`` layer).
         - ``y_true``: Target labels as sparse integer indices ``(batch_size,)`` or
@@ -187,11 +187,11 @@ class SoftmaxCategoricalCrossEntropy(Loss):
 
     Notes
     -----
-    - **Expected inputs:**
+    - Expected inputs:
         - ``logits``: Raw, unnormalized activations of shape ``(batch_size, n_classes)``.
         - ``y_true``: Target labels as sparse integer indices ``(batch_size,)`` or
           one-hot distributions ``(batch_size, n_classes)``.
-    - **Graph constraint:** Operates directly on logits; preceding this loss with an
+    - Graph constraint: Operates directly on logits; preceding this loss with an
       explicit ``SoftMax`` layer is prohibited to prevent redundant double normalization.
     """
     prohibited_preceding_layers = (SoftMax,)

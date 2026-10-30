@@ -118,9 +118,9 @@ class SoftMax(Layer):
 
     Notes
     -----
-    - **Expected input shape:** ``(batch_size, n_classes)``
-    - **Output shape:** ``(batch_size, n_classes)``
-    - **Precision policy:** Exempt from mixed-precision downcasting; forces
+    - Expected input shape: ``(batch_size, n_classes)``
+    - Output shape: ``(batch_size, n_classes)``
+    - Precision policy: Exempt from mixed-precision downcasting; forces
       intermediate arrays and outputs to ``float32``.
     """
     _precision_exempt = True

@@ -4,7 +4,6 @@ The setup script found in the README.md pop up
 from pathlib import Path
 
 import cupy as cp
-import numpy as np
 
 import aether as ae
 

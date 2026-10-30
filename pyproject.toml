@@ -60,6 +60,12 @@ extend-exclude = ["notebooks", "examples/legacy", "*.ipynb"]
 # Allow `import aether.config as config`; preferred here for readability.
 ignore = ["PLR0402"]
 
+[tool.ruff.lint.per-file-ignores]
+# Skeleton templates keep placeholder imports and `pass` bodies on purpose.
+"tests/integration/_integration_test_skeleton.py" = ["F401", "PIE790"]
+# Stub `__all__` lists are grouped by topic, not sorted.
+"*.pyi" = ["RUF022"]
+
 [tool.ruff.lint.flake8-comprehensions]
 # Allow dict(key=value) for kernel template/kwargs bundles.
 allow-dict-calls-with-keyword-arguments = true

@@ -22,13 +22,13 @@ class BatchNorm(Layer):
 
     Notes
     -----
-    - **Expected layout:** Channels-last. Operates over 2D inputs of shape
+    - Expected layout: Channels-last. Operates over 2D inputs of shape
       ``(batch_size, n_features)`` or 4D spatial inputs of shape
       ``(batch_size, height, width, n_channels)``.
-    - **Shape contract:**
+    - Shape contract:
         - Input: ``(d_0, d_1, ..., d_{k-1}, C)``
         - Output: ``(d_0, d_1, ..., d_{k-1}, C)`` (identical to input)
-    - **Training vs. Evaluation:**
+    - Training vs. Evaluation:
         - In training mode (``training=True``), mean and variance are computed
           from the current mini-batch across all leading axes, and running
           statistics are updated.

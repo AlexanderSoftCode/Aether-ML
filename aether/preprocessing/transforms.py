@@ -1,5 +1,6 @@
 import warnings
-from typing import Any, Optional, Sequence, Tuple, Union
+from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 
@@ -20,10 +21,10 @@ def _dtype_name(dt):
 
 def to_tensor(
     *args: Any,
-    target_device: Optional[str] = None,
-    dtype: Union[str, type, np.dtype, Sequence[Union[str, type, np.dtype]], None] = None,
+    target_device: str | None = None,
+    dtype: str | type | np.dtype | Sequence[str | type | np.dtype] | None = None,
     preserve_integers: bool = True
-) -> Union[Any, Tuple[Any, ...], None]:
+) -> Any | tuple[Any, ...] | None:
     """Converts array-like inputs into backend tensors (NumPy or CuPy).
 
     Flexible API for precision handling and hardware device placement. Accepts
@@ -566,7 +567,7 @@ class Compose(Preprocess):
         return cls(transforms=[deserialize(entry) for entry in cfg.get("transforms") or []])
 
 
-def deserialize(entry: dict | None) -> Optional[Preprocess]:
+def deserialize(entry: dict | None) -> Preprocess | None:
     """Reconstructs a Preprocess transform or pipeline from a serialized configuration dictionary.
 
     This function acts as the universal factory and resolver for preprocessing 
@@ -576,9 +577,9 @@ def deserialize(entry: dict | None) -> Optional[Preprocess]:
 
     When is this used?
     ------------------
-    - **Internally:** Called automatically by `Model.load()` to restore attached 
+    - Internally: Called automatically by `Model.load()` to restore attached 
       data preprocessing pipelines from saved `.aether` model archives.
-    - **Standalone:** Called by users to load or transfer preprocessor pipelines 
+    - Standalone: Called by users to load or transfer preprocessor pipelines 
       independently of a model (e.g., loading fitted scalers into external APIs, 
       ETL data workers, or configuration-driven workflows).
 

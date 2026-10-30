@@ -2,9 +2,8 @@ import warnings
 
 import numpy as np
 
-import aether.config as config
 import tests.base_case as base_case
-from aether.config import COMPUTE_DTYPE, PARAM_DTYPE, DTypePolicy
+from aether.config import PARAM_DTYPE, DTypePolicy
 
 
 class TestDTypePolicy(base_case.AetherBaseTestCase):
@@ -34,17 +33,15 @@ class TestDTypePolicy(base_case.AetherBaseTestCase):
         """Ensure passing strings outside COMPUTE_DTYPE raises ValueError."""
         invalid_dtypes = ['int8', 'int32', 'float8', 'complex64', 'invalid_type', 'bfloat16']
         for dt in invalid_dtypes:
-            with self.subTest(dtype=dt):
-                with self.assertRaises(ValueError):
-                    DTypePolicy(compute_dtype=dt)
+            with self.subTest(dtype=dt), self.assertRaises(ValueError):
+                DTypePolicy(compute_dtype=dt)
 
     def test_non_string_non_none_raises_type_error(self):
         """Ensure non-str and non-None inputs raise TypeError."""
         invalid_types = [123, 32.0, ['float32'], {'dtype': 'float32'}, True]
         for val in invalid_types:
-            with self.subTest(val=val):
-                with self.assertRaises(TypeError):
-                    DTypePolicy(compute_dtype=val)
+            with self.subTest(val=val), self.assertRaises(TypeError):
+                DTypePolicy(compute_dtype=val)
 
     def test_valid_initializations(self):
         """Verify valid compute_dtypes set attributes correctly."""

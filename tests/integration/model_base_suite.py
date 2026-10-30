@@ -4,7 +4,6 @@ Shared fixture-building helpers for Model-level integration tests.
 import math
 
 import aether as ae
-import aether.config as config
 import tests.base_case as base_case
 
 
@@ -37,9 +36,9 @@ class ModelIntegrationBaseCase(base_case.AetherBaseTestCase):
             optimizer=ae.Adam(lr=0.001, decay=5e-5),
             accuracy=ae.CategoricalAccuracy(),
         )
-        model.to(device if device is not None else self.backend_name)
+        model.to(target_device)
         model.manual_seed(seed=42)
-        
+
         return self._place_and_finalize(model, precision=precision, input_dim=input_dim)
 
     def build_mlp_model(self, *, device=None, precision=None, input_dim=(32, 32, 3)):
@@ -54,7 +53,7 @@ class ModelIntegrationBaseCase(base_case.AetherBaseTestCase):
             optimizer=ae.Adam(lr=0.001, decay=5e-5),
             accuracy=ae.CategoricalAccuracy(),
         )
-        model.to(device if device is not None else self.backend_name)
+        model.to(target_device)
         model.manual_seed(seed=42)
         return self._place_and_finalize(model, precision=precision, input_dim=input_dim)
 

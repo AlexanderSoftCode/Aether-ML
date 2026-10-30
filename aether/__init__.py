@@ -1,3 +1,12 @@
+"""Aether-ML: a deep learning framework built on NumPy and CuPy, with hand-written
+CUDA and ROCm kernels.
+
+Model, layers, losses, metrics, optimizers and preprocessing transforms are loaded
+lazily on first attribute access, so ``import aether`` stays cheap.
+
+The array backend is selected with ``Model.to()``: ``"numpy"`` runs on the CPU, and
+``"cupy"`` runs on the GPU using the hand-written kernels where the device supports them.
+"""
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _dist_version
 

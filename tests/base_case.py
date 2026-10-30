@@ -1,8 +1,6 @@
 import unittest
 import warnings
 
-import numpy as np
-
 import aether.config as config
 from aether.config import set_backend
 
@@ -55,7 +53,7 @@ class AetherBaseTestCase(unittest.TestCase):
 
     def shortDescription(self):
         """Docstrings are ommitted when running verbose -v unit tests"""
-        return None
+        return
 
     def make_built_layer(self, layer_cls, input_shape: tuple[int, ...], seed: int | None = None, **kwargs):
         """Constructs, binds to the active device backend, and builds a layer instance.
