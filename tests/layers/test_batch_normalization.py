@@ -1,5 +1,7 @@
 import aether.config as config
+import aether.custom_kernels.relu_kernel as gpu_relu
 import tests.base_case as base_case
+from aether.layers.activations import LeakyReLU, ReLU
 from aether.layers.normalization import BatchNorm
 
 
@@ -311,6 +313,79 @@ class TestBatchNormLayer(base_case.AetherBaseLayerTestCase):
         out = layer._forward_gpu(self.dense_inputs, training=False)
         expected = (self.dense_inputs - mean64) / self.xp.sqrt(var64 + self.EPSILON)
         self.assertTrue(self.xp.allclose(out, expected, atol=1e-5, rtol=1e-5))
+
+    def test_gpu_fused_activation_matches_unfused_chain(self):
+        """BatchNorm with a fused ReLU (alpha 0) or LeakyReLU (alpha 0.1) on GPU against
+        the fallback BatchNorm followed by the activation layer's own fallback: output,
+        dinputs, dweights and dbiases in training, and the output in inference."""
+        if self.backend_name != "cupy":
+            self.skipTest("GPU fusion test is only applicable on CuPy backend.")
+
+        C = self.RAGGED_SHAPE[-1]
+        # Every value is -3, -1, 1 or 3, so |x_hat| >= ~0.4 and z = gamma * x_hat + beta
+        # stays >= ~0.1 from 0: the two paths' rounding can't flip an element's mask.
+        levels = self.xp.array([-3.0, -1.0, 1.0, 3.0], dtype=self.xp.float32)
+        inputs = levels[self.xp.random.randint(0, 4, self.RAGGED_SHAPE)]
+        dvalues = self.xp.random.randn(*self.RAGGED_SHAPE).astype(self.xp.float32)
+
+        for alpha, activation in [(0.0, ReLU()), (0.1, LeakyReLU(alpha=0.1))]:
+            with self.subTest(activation=type(activation).__name__):
+                layer = self.make_built_layer(
+                    BatchNorm, input_shape=self.RAGGED_SHAPE[1:], epsilon=self.EPSILON, momentum=self.MOMENTUM
+                )
+                layer.gamma = self.xp.random.uniform(0.5, 2.0, C).astype(self.xp.float32)
+                layer.beta = self.xp.random.uniform(-0.1, 0.1, C).astype(self.xp.float32)
+
+                expected_out = activation._forward_fallback(layer._forward_fallback(inputs, training=True), True)
+                expected_dinputs = layer._backward_fallback(activation._backward_fallback(dvalues))
+                expected_dweights, expected_dbiases = layer.dweights.copy(), layer.dbiases.copy()
+
+                self.assertTrue(layer._fuse_activation(alpha))
+                out = layer._forward_gpu(inputs, training=True)
+                dinputs = layer._backward_gpu(dvalues)
+
+                self.assertTrue(self.xp.allclose(out, expected_out, atol=1e-4, rtol=1e-4))
+                self.assertTrue(self.xp.allclose(dinputs, expected_dinputs, atol=1e-4, rtol=1e-4))
+                self.assertTrue(self.xp.allclose(layer.dweights, expected_dweights, atol=1e-4, rtol=1e-4))
+                self.assertTrue(self.xp.allclose(layer.dbiases, expected_dbiases, atol=1e-4, rtol=1e-4))
+
+                # Running statistics (0, 5) put x_hat at +-0.45 and +-1.34 again.
+                layer.running_mean = self.xp.zeros(C, dtype=self.xp.float32)
+                layer.running_var = self.xp.full(C, 5.0, dtype=self.xp.float32)
+                expected = activation._forward_fallback(layer._forward_fallback(inputs, training=False), False)
+                out = layer._forward_gpu(inputs, training=False)
+                self.assertTrue(self.xp.allclose(out, expected, atol=1e-5, rtol=1e-5))
+
+    def test_gpu_fused_relu_nan_gradient_at_inactive_unit(self):
+        """As in ReLU's GPU backward, a NaN gradient at a unit the fused ReLU zeroed
+        contributes 0 to dinputs, dweights and dbiases, matching the unfused GPU
+        chain. With a LeakyReLU slope it propagates, as unfused LeakyReLU does."""
+        if self.backend_name != "cupy":
+            self.skipTest("GPU fusion test is only applicable on CuPy backend.")
+
+        layer, inputs = self._make_ragged()
+        C = self.RAGGED_SHAPE[-1]
+        z = layer._forward_gpu(inputs, training=True)
+        row, channel = (int(i) for i in self.xp.argwhere(z.reshape(-1, C) < 0)[0])
+        dvalues = self.xp.random.randn(*self.RAGGED_SHAPE).astype(self.xp.float32)
+        dvalues.reshape(-1, C)[row, channel] = self.xp.nan
+
+        # Unfused GPU chain: BatchNorm, then ReLU's select backward.
+        relu_dvalues = gpu_relu.relu_backward(dvalues, self.xp.maximum(0, z))
+        expected = [layer._backward_gpu(relu_dvalues).copy(), layer.dweights.copy(), layer.dbiases.copy()]
+
+        layer._fuse_activation(0.0)
+        layer._forward_gpu(inputs, training=True)
+        fused = [layer._backward_gpu(dvalues), layer.dweights, layer.dbiases]
+        for name, got, want in zip(("dinputs", "dweights", "dbiases"), fused, expected):
+            with self.subTest(name=name):
+                self.assertFalse(self.xp.any(self.xp.isnan(got)))
+                self.assertTrue(self.xp.allclose(got, want, atol=1e-4, rtol=1e-4))
+
+        layer._fuse_activation(0.1)
+        layer._forward_gpu(inputs, training=True)
+        layer._backward_gpu(dvalues)
+        self.assertTrue(self.xp.isnan(layer.dbiases[channel]))
 
     def test_gpu_non_float32_inputs_match_float32(self):
         """Regression: under set_precision() a Dense before BatchNorm emits fp16/fp64,

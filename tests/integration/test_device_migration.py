@@ -1,7 +1,11 @@
 import functools
+import os
+import tempfile
+import warnings
 
 import numpy as np
 
+import aether as ae
 import aether.config as config
 from aether.base import Layer
 from tests.base_case import register_test_suites
@@ -117,4 +121,113 @@ class TestDeviceMigration(ModelIntegrationBaseCase):
 
         for layer in model.trainable_layers:
             self.assertIsInstance(layer.weight_momentums, self.xp.ndarray)
+    def _build_bn_model(self, *, fuse_kernels=True):
+        """Conv -> BatchNorm -> ReLU -> Conv -> BatchNorm -> LeakyReLU -> GAP -> Dense, in
+        strict fp32: Conv2d's fp16 path would put its own rounding between the CPU and
+        GPU results, and Adam's first step (about lr * sign(g)) would turn it into
+        lr-sized parameter differences."""
+        self.enterContext(warnings.catch_warnings())
+        warnings.filterwarnings("ignore", message=r"\[aether\] Conv2d: precision policy requests 'float32'")
+        model = ae.Model()
+        model.add(ae.Conv2d(3, 8, (3, 3), (1, 1), padding="same"))
+        model.add(ae.BatchNorm())
+        model.add(ae.ReLU())
+        model.add(ae.Conv2d(8, 8, (3, 3), (1, 1), padding="same"))
+        model.add(ae.BatchNorm())
+        model.add(ae.LeakyReLU(alpha=0.1))
+        model.add(ae.GlobalAvgPool())
+        model.add(ae.Dense(8, self.NUM_CLASSES))
+        model.configure(
+            loss=ae.SoftmaxCategoricalCrossEntropy(),
+            optimizer=ae.Adam(lr=0.01),
+        )
+        model.to("cupy")
+        model.manual_seed(seed=self.SEED)
+        model.set_precision("float32")
+        model.finalize(input_shape=(8, 8, 3), fuse_kernels=fuse_kernels)
+        return model
+
+    def _activations(self, layers):
+        return [type(layer).__name__ for layer in layers if isinstance(layer, (ae.ReLU, ae.LeakyReLU))]
+
+    def test_fused_batchnorm_activation_matches_unfused(self):
+        """fuse_kernels=True skips the ReLU/LeakyReLU after each BatchNorm on CuPy, and
+        gives the same outputs, gradients and optimizer step as fuse_kernels=False."""
+        if not config.HAS_CUPY or self.backend_name != "cupy":
+            self.skipTest("Kernel fusion only applies on the CuPy backend.")
+
+        X, y = self.make_synthetic_image_data(n_samples=16, height=8, width=8)
+        fused = self._build_bn_model(fuse_kernels=True)
+        unfused = self._build_bn_model(fuse_kernels=False)
+        self.assertEqual(self._activations(fused._forward_layers), [])
+        self.assertEqual(self._activations(fused._backward_layers), [])
+        self.assertEqual(self._activations(unfused._forward_layers), ["ReLU", "LeakyReLU"])
+
+        outputs = [model.forward(X, training=True) for model in (fused, unfused)]
+        self.assertTrue(self.xp.allclose(*outputs, atol=1e-5, rtol=1e-4))
+
+        for model in (fused, unfused):
+            model.train(X, y, epochs=1, verbose=0)
+        for fused_layer, unfused_layer in zip(fused.trainable_layers, unfused.trainable_layers):
+            # A bias in front of BatchNorm has a true gradient of 0 (BatchNorm removes the
+            # mean), so its computed one is rounding noise that Adam scales up to ~lr.
+            idx = fused.layers.index(fused_layer)
+            before_norm = any(isinstance(layer, ae.BatchNorm) for layer in fused.layers[idx + 1:idx + 2])
+            zero_grad = {"biases"} if before_norm else set()
+            with self.subTest(layer=type(fused_layer).__name__):
+                for name in ("dweights", "dbiases"):
+                    self.assertTrue(self.xp.allclose(
+                        getattr(fused_layer, name), getattr(unfused_layer, name), atol=1e-5, rtol=1e-4
+                    ))
+                for name, tensor in fused_layer.get_parameters().items():
+                    if name in zero_grad:
+                        continue
+                    self.assertTrue(self.xp.allclose(
+                        tensor, unfused_layer.get_parameters()[name], atol=1e-5, rtol=1e-4
+                    ))
+
+    def test_fused_model_runs_every_layer_after_to_numpy(self):
+        """Regression guard: a model fused on CuPy must run its activations again after
+        to('numpy'), whose BatchNorm doesn't apply them, and re-fuse on the way back."""
+        if not config.HAS_CUPY or self.backend_name != "cupy":
+            self.skipTest("Cross-backend migration requires CuPy to be active.")
+
+        X, y = self.make_synthetic_image_data(n_samples=16, height=8, width=8)
+        model = self._build_bn_model()
+        model.train(X, y, epochs=1, verbose=0)
+        gpu_logits = config.to_device(model.predict(X, return_logits=True), target="numpy")
+
+        model.to("numpy")
+        X_cpu = config.to_device(X, target="numpy")
+        self.assertEqual(model._forward_layers, tuple(model.layers))
+        cpu_logits = model.predict(X_cpu, return_logits=True)
+        np.testing.assert_allclose(cpu_logits, gpu_logits, rtol=1e-4, atol=1e-4)
+        self.assertGreaterEqual(model.layers[2].output.min(), 0.0)
+
+        model.to("cupy")
+        self.assertEqual(self._activations(model._forward_layers), [])
+        regpu_logits = config.to_device(model.predict(X, return_logits=True), target="numpy")
+        np.testing.assert_allclose(regpu_logits, gpu_logits, rtol=1e-4, atol=1e-4)
+
+    def test_loaded_model_refuses_batchnorm_activation(self):
+        """Fusion isn't saved: the manifest keeps every layer, and load() fuses again."""
+        if not config.HAS_CUPY or self.backend_name != "cupy":
+            self.skipTest("Kernel fusion only applies on the CuPy backend.")
+
+        X, y = self.make_synthetic_image_data(n_samples=16, height=8, width=8)
+        model = self._build_bn_model()
+        model.train(X, y, epochs=1, verbose=0)
+        expected = model.predict(X, return_logits=True)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "fused.aether")
+            model.save(path)
+            loaded = ae.Model.load(path, device="cupy")
+
+        self.assertEqual(self._activations(loaded.layers), ["ReLU", "LeakyReLU"])
+        self.assertEqual(self._activations(loaded._forward_layers), [])
+        np.testing.assert_allclose(
+            loaded.predict(X, return_logits=True), expected, rtol=1e-4, atol=1e-4
+        )
+
 register_test_suites(globals(), TestDeviceMigration)
