@@ -1,17 +1,38 @@
 import numpy as np
 
 import aether.config as config
+import aether.custom_kernels.relu_kernel as gpu_relu
 from aether.base import Layer
 
 
 class ReLU(Layer):
     """Rectified Linear Unit activation function: `f(x) = max(0, x)`."""
-    def forward(self, inputs, training):
+    def __init__(self):
+        super().__init__()
+        self.forward = self._forward_fallback
+        self.backward = self._backward_fallback
+
+    def _compile_for_device(self, device):
+        """Triggered by Model.to(device) to map low-level hardware paths"""
+        # Forward has no GPU kernel: maximum already runs at memory bandwidth.
+        self.forward = self._forward_fallback
+        if device == 'cupy' and gpu_relu.is_gpu_relu_backward_available():
+            self.backward = self._backward_gpu
+        else:
+            self.backward = self._backward_fallback
+
+    def _forward_fallback(self, inputs, training):
         xp = config.get_array_module(inputs)
         self.output = xp.maximum(0, inputs)
         return self.output
-    
-    def backward(self, dvalues): 
+
+    def _backward_gpu(self, dvalues):
+        # One pass instead of a bool mask plus a mixed-dtype multiply. A select, so a
+        # NaN gradient at an inactive unit becomes 0 rather than NaN * 0.
+        self.dinputs = gpu_relu.relu_backward(dvalues, self.output)
+        return self.dinputs
+
+    def _backward_fallback(self, dvalues):
         self.dinputs = dvalues * (self.output > 0)
         return self.dinputs
 
@@ -21,11 +42,11 @@ def _fused_leaky_relu_forward(x, alpha):
 
 @config.fuse_kernel()
 def _fused_leaky_relu_backward(dvalues, output, alpha):
-    # ROCm/HIP Workaround: Comparing fusion variables against raw Python literals 
-    # (e.g., output > 0) causes a type-guessing bug in modern NumPy environments, 
+    # ROCm/HIP Workaround: Comparing fusion variables against raw Python literals
+    # (e.g., output > 0) causes a type-guessing bug in modern NumPy environments,
     # throwing an AttributeError on AMD architectures during the AST trace.
     # Generating a zero scalar explicitly typed by multiplying 'alpha * 0'
-    # ensures variable-to-variable comparison, bypassing weak type-promotion logic 
+    # ensures variable-to-variable comparison, bypassing weak type-promotion logic
     # and compiling cleanly into a branchless SIMD loop on both CUDA and HIP stacks.
     fused_zero = alpha * 0
     result = dvalues * (1.0 - (output <= fused_zero) * (1.0 - alpha))
@@ -102,7 +123,7 @@ class SoftMax(Layer):
     - **Precision policy:** Exempt from mixed-precision downcasting; forces
       intermediate arrays and outputs to ``float32``.
     """
-    _precision_exempt = True 
+    _precision_exempt = True
     def forward(self, inputs, training=False):
         xp = config.get_array_module(inputs)
 
@@ -110,18 +131,18 @@ class SoftMax(Layer):
             inputs = inputs.astype(xp.float32, copy=False)
 
         exp_values = xp.exp(inputs - xp.max(inputs, axis=1, keepdims = True)) #e**(inputs - max(inputs by row))
-        probabilities = exp_values / xp.sum(exp_values, axis=1, keepdims = True) #e**k / sum(e**k) 
+        probabilities = exp_values / xp.sum(exp_values, axis=1, keepdims = True) #e**k / sum(e**k)
         self.output = probabilities
 
         return self.output
 
     # A vectorized pass of the SoftMax backwards pass
-    def backward(self, dvalues): 
+    def backward(self, dvalues):
         xp = config.get_array_module(dvalues)
 
         if dvalues.dtype != xp.float32:
             dvalues = dvalues.astype(xp.float32, copy=False)
-            
+
         sum_dvalues_output = xp.sum(dvalues * self.output, axis = -1, keepdims=True)
         self.dinputs = self.output * (dvalues - sum_dvalues_output)
         return self.dinputs
