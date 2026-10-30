@@ -5,6 +5,25 @@ import aether.config as config
 BLOCK_Y = 8
 
 
+# The activation every BatchNorm kernel applies to z = (x - mean) * scale + beta:
+# out = z > 0 ? z : alpha * z, so alpha = 1 is none, 0 is ReLU, else LeakyReLU.
+# Forward and backward compute z from this one source, so the backward's mask is
+# bit-identical to the forward's. As in ReLU's GPU backward, a NaN/inf gradient
+# at an inactive ReLU unit gives 0, not 0 * NaN.
+_ACTIVATION = r'''
+__device__ __forceinline__ float bn_z(float x, float mean, float scale, float beta) {
+    return fmaf(x - mean, scale, beta);
+}
+
+__device__ __forceinline__ float bn_act(float z, float alpha) {
+    return z > 0.0f ? z : alpha * z;
+}
+
+__device__ __forceinline__ float bn_act_grad(float z, float dy, float alpha) {
+    return z > 0.0f ? dy : (alpha != 0.0f ? alpha * dy : 0.0f);
+}
+'''
+
 # Shared by every kernel below. block_sum adds each thread's (a, b) pair over the
 # block's BLOCK_Y rows and returns true on the row-0 threads that hold a channel's
 # total; sum_partials does the same over the G rows of a partials[2, G, C] buffer.
@@ -12,6 +31,8 @@ _PRELUDE = r'''
 $hip_include
 #define WAVEFRONT 32
 #define BLOCK_Y   $block_y
+
+$activation
 
 __device__ __forceinline__ bool block_sum(float& a, float& b, int c, int C) {
     __shared__ float sh_a[BLOCK_Y][WAVEFRONT];
@@ -54,6 +75,9 @@ void $kernel_name(
     const float* __restrict__ p,
     const float* __restrict__ q,      // unused (nullptr) ops still take the param
     const float* __restrict__ mean,   // channel mean [C], unused ops pass nullptr
+    const float* __restrict__ scale,  // grad_sums only, like beta and alpha
+    const float* __restrict__ beta,
+    const float alpha,
     float* __restrict__ partials,     // [2, gridDim.y, C]
     const int N,
     const int C
@@ -156,8 +180,11 @@ _STATS_OP = {
 _GRAD_SUMS_OP = {
     "name": "grad_sums",
     "template": _STATS_REDUCE_TEMPLATE,
-    "prologue": "float mu = mean[c];",
-    "accumulate": "float g = p[idx]; acc_a += g; acc_b += g * (q[idx] - mu);",
+    "prologue": "float mu = mean[c]; float sc = scale[c]; float bt = beta[c];",
+    "accumulate": (
+        "float xv = q[idx]; float g = bn_act_grad(bn_z(xv, mu, sc, bt), p[idx], alpha);"
+        " acc_a += g; acc_b += g * (xv - mu);"
+    ),
 }
 
 _FORWARD_FINALIZE_OP = {
@@ -190,6 +217,7 @@ def _get_compiled_kernel(op_dict: dict, variant: str, block_y: int = BLOCK_Y):
         block_y=block_y,
         prologue=op_dict.get("prologue", ""),
         accumulate=op_dict.get("accumulate", ""),
+        activation=_ACTIVATION,
         **vendor,
     )
 
@@ -226,20 +254,26 @@ def get_bn_backward_finalize_kernel(variant: str):
 # folding (mean, scale, beta) into one bias out of the output.
 _bn_apply_ew = config.build_kernel(
     lambda: config.cp.ElementwiseKernel(
-        'float32 x, float32 mean, float32 scale, float32 beta',
+        'float32 x, float32 mean, float32 scale, float32 beta, float32 alpha',
         'float32 out',
-        'out = fmaf(x - mean, scale, beta);',
+        'out = bn_act(bn_z(x, mean, scale, beta), alpha);',
         'bn_apply_ew',
+        preamble=_ACTIVATION,
     ),
     name='_bn_apply_ew',
 )
 
 _bn_backward_ew = config.build_kernel(
     lambda: config.cp.ElementwiseKernel(
-        'float32 dvalues, float32 x, float32 mean, float32 scale, float32 k1, float32 k2',
+        'float32 dvalues, float32 x, float32 mean, float32 scale, float32 beta, '
+        'float32 k1, float32 k2, float32 alpha',
         'float32 dinputs',
-        'dinputs = dvalues * scale + (x - mean) * k1 + k2;',
+        '''
+        float g = bn_act_grad(bn_z(x, mean, scale, beta), dvalues, alpha);
+        dinputs = g * scale + (x - mean) * k1 + k2;
+        ''',
         'bn_backward_ew',
+        preamble=_ACTIVATION,
     ),
     name='_bn_backward_ew',
 )

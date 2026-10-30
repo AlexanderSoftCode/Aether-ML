@@ -71,6 +71,9 @@ class BatchNorm(Layer):
         self._forward_finalize_kernel = None
         self._grad_sums_kernel = None
         self._backward_finalize_kernel = None
+        # Leaky slope of an activation the GPU kernels apply after normalizing:
+        # 1 is none (see _fuse_activation).
+        self._alpha = np.float32(1.0)
 
         self.forward = self._forward_fallback
         self.backward = self._backward_fallback
@@ -133,6 +136,8 @@ class BatchNorm(Layer):
 
     def _compile_for_device(self, device):
         """Triggered by Model.to(device) to map low-level hardware paths."""
+        # Model re-plans activation fusion after every device sync.
+        self._alpha = np.float32(1.0)
         if device == "cupy" and config.HAS_CUPY and gpu_bn.is_gpu_bn_available():
             variant, _ = config.resolve_gpu_launch_geometry()
 
@@ -148,6 +153,15 @@ class BatchNorm(Layer):
             self.forward = self._forward_fallback
             self.backward = self._backward_fallback
 
+    def _fuse_activation(self, alpha) -> bool:
+        """Apply `out = z > 0 ? z : alpha * z` to the output inside the GPU kernels,
+        so the activation layer that follows can be skipped: 0 is ReLU, else
+        LeakyReLU. Returns False, changing nothing, when the GPU path isn't bound."""
+        if self.forward != self._forward_gpu:
+            return False
+        self._alpha = np.float32(alpha)
+        return True
+
     def _forward_gpu(self, inputs, training):
         xp = config.cp
         # The kernels read raw float* buffers; a precision policy can hand us
@@ -160,7 +174,7 @@ class BatchNorm(Layer):
 
         if not training:
             scale = self.gamma / xp.sqrt(self.running_var + self.epsilon)
-            gpu_bn._bn_apply_ew(inputs, self.running_mean, scale, self.beta, output)
+            gpu_bn._bn_apply_ew(inputs, self.running_mean, scale, self.beta, self._alpha, output)
             return output
 
         meta = self._get_shape_meta(inputs.shape)
@@ -170,7 +184,7 @@ class BatchNorm(Layer):
         partials = xp.empty(meta["partials_shape"], dtype=xp.float32)
         self._stats_kernel(
             meta["grid_dim"], meta["block_dim"],
-            (inputs_flat, None, None, partials) + meta["static_args"],
+            (inputs_flat, None, None, None, None, np.float32(1.0), partials) + meta["static_args"],
         )
 
         # Rows: mean, var, inv_std, scale. The running statistics update in place.
@@ -186,7 +200,7 @@ class BatchNorm(Layer):
         self.inputs = inputs
         self.batch_mean, self.batch_var, self.inv_std, self.scale = stats
 
-        gpu_bn._bn_apply_ew(inputs, self.batch_mean, self.scale, self.beta, output)
+        gpu_bn._bn_apply_ew(inputs, self.batch_mean, self.scale, self.beta, self._alpha, output)
         return output
 
     def _backward_gpu(self, dvalues):
@@ -200,8 +214,8 @@ class BatchNorm(Layer):
         partials = xp.empty(meta["partials_shape"], dtype=xp.float32)
         self._grad_sums_kernel(
             meta["grid_dim"], meta["block_dim"],
-            (dvalues.reshape(N, C), self.inputs.reshape(N, C), self.batch_mean, partials)
-            + meta["static_args"],
+            (dvalues.reshape(N, C), self.inputs.reshape(N, C), self.batch_mean,
+             self.scale, self.beta, self._alpha, partials) + meta["static_args"],
         )
 
         # Rows: dgamma, dbeta, then the dx coefficients k1 and k2.
@@ -214,7 +228,8 @@ class BatchNorm(Layer):
 
         self.dinputs = xp.empty_like(dvalues)
         gpu_bn._bn_backward_ew(
-            dvalues, self.inputs, self.batch_mean, self.scale, k1, k2, self.dinputs
+            dvalues, self.inputs, self.batch_mean, self.scale, self.beta, k1, k2,
+            self._alpha, self.dinputs,
         )
         return self.dinputs
 
