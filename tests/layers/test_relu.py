@@ -1,4 +1,3 @@
-import aether.config as config
 import tests.base_case as base_case
 from aether.layers.activations import ReLU
 
@@ -94,6 +93,24 @@ class TestReLU(base_case.AetherBaseLayerTestCase):
         layer.backward(dvalues)
 
         self.xp.testing.assert_array_equal(dvalues, original_dvalues)
+
+    def test_backward_mixed_dtypes_and_nan(self):
+        """fp16 output with fp32 dvalues keeps dvalues' dtype; a NaN gradient at an
+        inactive unit is zeroed by the GPU select but propagates through the
+        fallback's multiply."""
+        layer = self.make_built_layer(ReLU, input_shape=(5,))
+        inputs = self.xp.array([[-2.0, 0.0, 2.0, 3.0, 1.0]], dtype=self.xp.float16)
+        dvalues = self.xp.array([[5.0, float("nan"), 7.0, -1.0, float("nan")]],
+                                dtype=self.xp.float32)
+        inactive_nan = 0.0 if self.backend_name == "cupy" else float("nan")
+        expected = self.xp.array([[0.0, inactive_nan, 7.0, -1.0, float("nan")]],
+                                 dtype=self.xp.float32)
+
+        layer.forward(inputs, training=True)
+        dinputs = layer.backward(dvalues)
+
+        self.assertEqual(dinputs.dtype, self.xp.float32)
+        self.xp.testing.assert_array_equal(dinputs, expected)
 
 
 base_case.register_test_suites(globals(), TestReLU)
