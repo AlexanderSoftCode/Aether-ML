@@ -440,7 +440,10 @@ class Model:
 
         Args:
             compute_dtype (str): The target floating-point precision -- one of
-                'float16', 'float32', or 'float64'.
+                'float16', 'float32', or 'float64'. If never set, layers use
+                mixed precision where their kernels allow it; 'float32' asks
+                for strict fp32, so Conv2d uses its slower fallback on GPU
+                (and warns).
         Raises:
             TypeError: If `compute_dtype` is not a str or None.
             ValueError: If `compute_dtype` is not one of the currently supported precisions.
