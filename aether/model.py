@@ -58,6 +58,15 @@ _ARCHIVE_MEMBERS = {
     "weights.safetensors": (zipfile.ZIP_STORED,),
 }
 
+# (normalization, activation) pairs whose activation BatchNorm can apply inside its
+# own GPU kernels, mapped to the leaky slope it takes. Exact types, so subclasses
+# that change the activation never fuse.
+_FUSIBLE_PAIRS = {
+    (layer_module.BatchNorm, layer_module.ReLU): lambda activation: 0.0,
+    (layer_module.BatchNorm, layer_module.LeakyReLU): lambda activation: activation.alpha,
+}
+
+
 def _serialize_component(obj):
     if obj is None or isinstance(obj, (NullOptimizer, NullAccuracy, NullPreprocessor)):
         return None
@@ -284,6 +293,9 @@ class Model:
         self.device = None
         self.precision_policy = None
         self.trainable_layers = []
+        self._fuse_kernels = True
+        self._forward_layers = ()
+        self._backward_layers = ()
         self._seed = None
         self._predict_activation = None
         self._rng_clock = None
@@ -422,6 +434,7 @@ class Model:
         self._sync_device(target_device=target_device)
 
         if self.is_finalized:
+            self._bind_fusion()
             for layer in self.trainable_layers:
                 param_dict = layer.get_parameters()
                 migrated_dict = {}
@@ -464,10 +477,19 @@ class Model:
         ):
             self.preprocessor._apply_precision(self.precision_policy)
 
-    def finalize(self, input_shape: tuple[int, ...]):
+    def finalize(self, input_shape: tuple[int, ...], fuse_kernels: bool = True):
         """
         Finalizes the model architecture, propagating tensor dimensions
         and allocating weights/buffers across all registered layers.
+
+        Args:
+            input_shape (tuple[int, ...]): Shape of one sample, without the batch axis.
+            fuse_kernels (bool): On CuPy, a BatchNorm directly followed by ReLU or
+                LeakyReLU applies the activation inside its own kernels and the
+                activation layer is skipped, saving a read and a write of the
+                activations in both directions. Fusion is re-planned on every `to()`,
+                and never applies on NumPy. Not saved: `load()` fuses by default.
+                Defaults to True.
         """
         if self.is_finalized:
             raise RuntimeError("Cannot modify model after finalize() has been called.")
@@ -504,12 +526,11 @@ class Model:
             if getattr(layer, "weights", None) is not None or getattr(layer, "biases", None) is not None
         ]
 
-        # Nothing below the first trainable layer consumes a gradient, so backward stops
-        # there and that layer skips its dX.
-        first = self.layers.index(self.trainable_layers[0]) if self.trainable_layers else 0
-        self._backward_layers = tuple(reversed(self.layers[first:]))
+        # Nothing below the first trainable layer consumes a gradient, so that layer
+        # skips its dX (and backward stops there, see _bind_fusion).
         if self.trainable_layers:
             self.trainable_layers[0].needs_input_grad = False
+        self._fuse_kernels = fuse_kernels
 
         if self.loss is not None:
             self.loss.validate_graph(layers=self.layers)
@@ -545,7 +566,27 @@ class Model:
             self.device = "cupy" if config.xp.__name__ == "cupy" else "numpy"
 
         self._sync_device()
+        self._bind_fusion()
         self.is_finalized = True
+
+    def _bind_fusion(self):
+        """Fuses BatchNorm + activation pairs for the device the layers were just
+        compiled for, and rebuilds the forward/backward layer sequences without the
+        fused activations. Every _compile_for_device resets BatchNorm to no
+        activation, so a pair fused on CuPy runs unfused after `to('numpy')`."""
+        fused = set()
+        if self._fuse_kernels:
+            for norm, activation in zip(self.layers, self.layers[1:]):
+                alpha_of = _FUSIBLE_PAIRS.get((type(norm), type(activation)))
+                if alpha_of is not None and norm._fuse_activation(alpha_of(activation)):
+                    fused.add(id(activation))
+
+        self._forward_layers = tuple(layer for layer in self.layers if id(layer) not in fused)
+        # Backward stops at the first trainable layer.
+        first = self.layers.index(self.trainable_layers[0]) if self.trainable_layers else 0
+        self._backward_layers = tuple(
+            layer for layer in reversed(self.layers[first:]) if id(layer) not in fused
+        )
 
     def _check_ready(self, op_name):
         """Guard shared by train/evaluate/predict: the model must be finalized."""
@@ -658,7 +699,7 @@ class Model:
         Sequentially propagate input batch through all layers.
         """
         output = X
-        for layer in self.layers:
+        for layer in self._forward_layers:
             output = layer.forward(output, training=training)
         return output
 
