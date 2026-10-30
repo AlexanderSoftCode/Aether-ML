@@ -26,6 +26,7 @@ from aether.losses.categorical_crossentropy import (
 )
 
 # Direct module imports resolve stub lookups instantly:
+from aether.metrics.accuracy import Accuracy as Accuracy
 from aether.metrics.accuracy import (
     CategoricalAccuracy as CategoricalAccuracy,
 )
@@ -35,10 +36,13 @@ from aether.metrics.accuracy import (
 from aether.model import Model as Model
 from aether.optimizers.adam import Adam as Adam
 from aether.optimizers.adam import AdamW as AdamW
+from aether.optimizers.adam import Optimizer as Optimizer
 from aether.preprocessing.transforms import Compose as Compose
+from aether.preprocessing.transforms import Preprocess as Preprocess
 from aether.preprocessing.transforms import Rescale as Rescale
 from aether.preprocessing.transforms import StandardScaler as StandardScaler
 from aether.preprocessing.transforms import ToTensor as ToTensor
+from aether.preprocessing.transforms import deserialize as deserialize
 from aether.preprocessing.transforms import to_tensor as to_tensor
 
 __all__ = [
@@ -62,15 +66,19 @@ __all__ = [
     "CategoricalCrossEntropy",
     "SoftmaxCategoricalCrossEntropy",
     # metrics
+    "Accuracy",
     "CategoricalAccuracy",
     "RegressionAccuracy",
     # optimizers
+    "Optimizer",
     "Adam",
     "AdamW",
     # preprocessing
     "to_tensor",
+    "Preprocess",
     "ToTensor",
     "StandardScaler",
     "Rescale",
-    "Compose"
+    "Compose",
+    "deserialize",
 ]
