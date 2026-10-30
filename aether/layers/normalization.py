@@ -87,9 +87,13 @@ class BatchNorm(Layer):
         N = int(np.prod(input_shape)) // C
         block_y = gpu_bn.BLOCK_Y
 
+        # Fill every resident block slot once along N: fewer blocks leave the GPU
+        # idle, more only add partials to reduce.
+        mp_count, max_threads_per_mp = config.get_device_multiprocessor_limits()
+        slots = mp_count * max(1, max_threads_per_mp // (32 * block_y))
         block_dim = (32, block_y, 1)
         grid_x = (C + 31) // 32
-        grid_y = min(64, (N + block_y - 1) // block_y)
+        grid_y = max(1, min((N + block_y - 1) // block_y, slots // grid_x))
         grid_dim = (grid_x, grid_y, 1)
 
         static_args = (
