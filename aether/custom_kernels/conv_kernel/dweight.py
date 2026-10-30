@@ -4,7 +4,6 @@ from string import Template
 import aether.config as config
 from aether.custom_kernels.conv_kernel.common import (
     _BLOCK_TILE_M,
-    _BLOCK_TILE_N,
     _COMPILE_OPTIONS,
     _CONV_CUDA,
     _CONV_HIP,
@@ -12,6 +11,8 @@ from aether.custom_kernels.conv_kernel.common import (
     ConvLaunchPlan,
     ConvShapeMeta,
     _m_total,
+    choose_block_tile_n,
+    threads_per_block,
 )
 
 # LDS padding for the dweight kernel's staging buffers, in halves. Tuned
@@ -77,13 +78,35 @@ using $wmma_ns::mma_sync;
 using $wmma_ns::fill_fragment;
 using $wmma_ns::fragment;
 
-// bias_acc is sized by the B-tile strided-loop trip count; keep them in sync.
-#define BIAS_ITEMS (((WMMA_K * BLOCK_TILE_N) + THREADS - 1) / THREADS)
+// 16-byte staging: a lane moves 8 consecutive channels (one uint4) when the
+// channel count keeps every 8-aligned k (or n) chunk inside one channel run.
+// Otherwise (e.g. C_IN = 3) the tile is staged one element per lane.
+#define VEC 8
+#define VEC_A ($vectorize && C_IN % VEC == 0)
+#define VEC_B ($vectorize && C_OUT % VEC == 0)
+#define A_VEC_THREADS (WMMA_K * BLOCK_TILE_M / VEC)
+#define B_VEC_THREADS (WMMA_K * BLOCK_TILE_N / VEC)
+#if VEC_A
+#define B_T0 A_VEC_THREADS
+#else
+#define B_T0 0
+#endif
+static_assert(B_T0 + B_VEC_THREADS <= THREADS, "vector staging needs a lane per A and B chunk");
 
+#if !VEC_A
 // The A-gather hoists its filter-index decomposition out of the reduction
 // loop, which is only valid if a lane's filter index never changes as the
 // strided staging loop advances by THREADS.
 static_assert(THREADS % BLOCK_TILE_M == 0, "THREADS must be a multiple of BLOCK_TILE_M");
+#endif
+#if VEC_B
+// A B lane keeps the same 8 columns for every mt, so it sums their bias in
+// 8 registers.
+#define BIAS_ITEMS VEC
+#else
+// bias_acc is sized by the B-tile strided-loop trip count; keep them in sync.
+#define BIAS_ITEMS (((WMMA_K * BLOCK_TILE_N) + THREADS - 1) / THREADS)
+#endif
 static_assert(THREADS >= BLOCK_TILE_N, "bias flush assumes one thread per N column");
 
 extern "C" __global__ void __launch_bounds__(THREADS) conv_backward_dweight_wmma(
@@ -106,13 +129,13 @@ extern "C" __global__ void __launch_bounds__(THREADS) conv_backward_dweight_wmma
     const int warp_row = warp_id / WARPS_N;
     const int warp_col = warp_id % WARPS_N;
     // Warps whose 16x16 tile lies past K_TOTAL or C_OUT would multiply
-    // zeros (e.g. C_OUT=32 or K_TOTAL=27 leave half the 64x64 tile empty).
+    // zeros (e.g. K_TOTAL=27 leaves the last 16 rows of a 32-row tile empty).
     const bool warp_live = warp_row < WARPS_M && warp_col < WARPS_N
                         && k_tile_start + warp_row * WMMA_M < K_TOTAL
                         && n_tile_start + warp_col * WMMA_N < C_OUT;
 
-    __shared__ half As[WMMA_K][A_LD];
-    __shared__ half Bs[WMMA_K][BLOCK_TILE_N + B_PAD];
+    __shared__ alignas(32) half As[WMMA_K][A_LD];
+    __shared__ alignas(32) half Bs[WMMA_K][BLOCK_TILE_N + B_PAD];
     __shared__ float s_bias[BLOCK_TILE_N];
 
     fragment<$matrix_a_tag, WMMA_M, WMMA_N, WMMA_K, half, $frag_layout_a_col> a_frag;
@@ -124,17 +147,35 @@ extern "C" __global__ void __launch_bounds__(THREADS) conv_backward_dweight_wmma
     #pragma unroll
     for (int i = 0; i < BIAS_ITEMS; ++i) bias_acc[i] = 0.0f;
 
+#if VEC_B
+    const bool b_lane = threadIdx.x >= B_T0 && threadIdx.x < B_T0 + B_VEC_THREADS;
+    const int b_m  = (threadIdx.x - B_T0) / (BLOCK_TILE_N / VEC);
+    const int b_n8 = ((threadIdx.x - B_T0) % (BLOCK_TILE_N / VEC)) * VEC;
+    const bool b_n_valid = b_lane && n_tile_start + b_n8 < C_OUT;
+#endif
+
     if (blockIdx.x == 0 && threadIdx.x < BLOCK_TILE_N) {
         s_bias[threadIdx.x] = 0.0f;
     }
     __syncthreads();
 
+#if VEC_A
+    // Each A lane owns 8 consecutive filter indices (one filter tap, 8 c_in)
+    // of one pixel row; K_TOTAL is a multiple of 8, so the chunk is all in
+    // range or all out.
+    const bool a_lane   = threadIdx.x < A_VEC_THREADS;
+    const int a_lane_m0 = threadIdx.x / (BLOCK_TILE_M / VEC);
+    const int a_lane_k  = (threadIdx.x % (BLOCK_TILE_M / VEC)) * VEC;
+    const int k_global_a = k_tile_start + a_lane_k;
+    const bool a_k_valid = a_lane && (k_global_a < K_TOTAL);
+#else
     const int a_lane_k  = threadIdx.x % BLOCK_TILE_M;
     const int a_lane_m0 = threadIdx.x / BLOCK_TILE_M;
     const int a_rows_per_pass = THREADS / BLOCK_TILE_M;
 
     const int k_global_a = k_tile_start + a_lane_k;
     const bool a_k_valid = (k_global_a < K_TOTAL);
+#endif
     const int c_in_a = a_k_valid ? (k_global_a % C_IN)        : 0;
     const int fw_a   = a_k_valid ? ((k_global_a / C_IN) % F_W) : 0;
     const int fh_a   = a_k_valid ? (k_global_a / C_IN_FW)      : 0;
@@ -151,6 +192,28 @@ extern "C" __global__ void __launch_bounds__(THREADS) conv_backward_dweight_wmma
         // Consecutive lanes walk consecutive filter indices, hence consecutive
         // c_in, hence contiguous `input` addresses. The LDS write is likewise
         // contiguous and bank-conflict free.
+#if VEC_A
+        if (a_lane) {
+            const unsigned int m_global = (unsigned int)mt * WMMA_K + a_lane_m0;
+
+            uint4 val = {0u, 0u, 0u, 0u};
+            if (a_k_valid && m_global < (unsigned int)M_total) {
+                const unsigned int s     = m_global / HW_OUT;
+                const unsigned int rem_m = m_global % HW_OUT;
+                const int h_out = (int)(rem_m / W_OUT);
+                const int w_out = (int)(rem_m % W_OUT);
+
+                const int h_in = h_out * STR_H - PAD_H + fh_a;
+                const int w_in = w_out * STR_W - PAD_W + fw_a;
+
+                if (h_in >= 0 && h_in < H_IN && w_in >= 0 && w_in < W_IN) {
+                    const long long in_idx = (((long long)s * H_IN + h_in) * W_IN + w_in) * C_IN + c_in_a;
+                    val = *reinterpret_cast<const uint4*>(&input[in_idx]);
+                }
+            }
+            *reinterpret_cast<uint4*>(&As[a_lane_m0][a_lane_k]) = val;
+        }
+#else
         #pragma unroll
         for (int local_m = a_lane_m0; local_m < WMMA_K; local_m += a_rows_per_pass) {
             const unsigned int m_global = (unsigned int)mt * WMMA_K + local_m;
@@ -172,8 +235,26 @@ extern "C" __global__ void __launch_bounds__(THREADS) conv_backward_dweight_wmma
             }
             As[local_m][a_lane_k] = val;
         }
+#endif
 
         // --- B tile: Load dY & register-accumulate bias ---
+#if VEC_B
+        if (b_lane) {
+            const unsigned int m_global = (unsigned int)mt * WMMA_K + b_m;
+
+            uint4 val = {0u, 0u, 0u, 0u};
+            if (b_n_valid && m_global < (unsigned int)M_total) {
+                val = *reinterpret_cast<const uint4*>(
+                    &dvalues[(long long)m_global * C_OUT + n_tile_start + b_n8]);
+                if (blockIdx.x == 0) {
+                    const half* h = reinterpret_cast<const half*>(&val);
+                    #pragma unroll
+                    for (int j = 0; j < VEC; ++j) bias_acc[j] += __half2float(h[j]);
+                }
+            }
+            *reinterpret_cast<uint4*>(&Bs[b_m][b_n8]) = val;
+        }
+#else
         if (blockIdx.x == 0) {
             int item = 0;
             for (int idx = threadIdx.x; idx < WMMA_K * BLOCK_TILE_N; idx += blockDim.x, ++item) {
@@ -203,6 +284,7 @@ extern "C" __global__ void __launch_bounds__(THREADS) conv_backward_dweight_wmma
                 Bs[local_m][local_n] = val;
             }
         }
+#endif
 
         __syncthreads();
 
@@ -239,6 +321,16 @@ extern "C" __global__ void __launch_bounds__(THREADS) conv_backward_dweight_wmma
     }
 
     // --- Epilogue: Local bias flush to shared memory ---
+#if VEC_B
+    if (blockIdx.x == 0 && b_n_valid) {
+        #pragma unroll
+        for (int j = 0; j < VEC; ++j) {
+            if (bias_acc[j] != 0.0f) {
+                atomicAdd(&s_bias[b_n8 + j], bias_acc[j]);
+            }
+        }
+    }
+#else
     if (blockIdx.x == 0) {
         int item = 0;
         for (int idx = threadIdx.x; idx < WMMA_K * BLOCK_TILE_N; idx += blockDim.x, ++item) {
@@ -248,6 +340,7 @@ extern "C" __global__ void __launch_bounds__(THREADS) conv_backward_dweight_wmma
             }
         }
     }
+#endif
     __syncthreads();
 
     // --- Epilogue: Atomic global write for dbiases per slice ---
@@ -263,14 +356,18 @@ extern "C" __global__ void __launch_bounds__(THREADS) conv_backward_dweight_wmma
 _CONV_BACKWARD_DWEIGHT_CACHE = {}
 
 
-def get_compiled_backward_dweight_kernel(shape_meta: ConvShapeMeta):
-    key = shape_meta.cache_key
-    if key in _CONV_BACKWARD_DWEIGHT_CACHE:
-        return _CONV_BACKWARD_DWEIGHT_CACHE[key]
+def _dweight_tiles(shape_meta: ConvShapeMeta):
+    # dW = X^T * dY: the GEMM M axis is K_TOTAL, so a short filter axis (the
+    # first CIFAR-10 conv has K_TOTAL = 27) takes a 32-row tile.
+    block_tile_m = 32 if shape_meta.K_total <= 32 else _BLOCK_TILE_M
+    return block_tile_m, choose_block_tile_n(shape_meta.C_out)
 
+
+def render_dweight_source(shape_meta: ConvShapeMeta, vectorize=True):
+    """CUDA/HIP source for one shape. vectorize=False forces the scalar staging."""
     vendor = _CONV_HIP if shape_meta.is_hip else _CONV_CUDA
-    block_tile_m, block_tile_n = _BLOCK_TILE_M, _BLOCK_TILE_N
-    source = CNN_BACKWARD_DWEIGHT_TEMPLATE.substitute(
+    block_tile_m, block_tile_n = _dweight_tiles(shape_meta)
+    return CNN_BACKWARD_DWEIGHT_TEMPLATE.substitute(
         c_in=shape_meta.C_in, c_out=shape_meta.C_out,
         f_h=shape_meta.fH, f_w=shape_meta.fW,
         str_h=shape_meta.sH, str_w=shape_meta.sW,
@@ -280,8 +377,17 @@ def get_compiled_backward_dweight_kernel(shape_meta: ConvShapeMeta):
         wmma_dim=_WMMA_DIM,
         block_tile_m=block_tile_m, block_tile_n=block_tile_n,
         a_pad=_DWEIGHT_A_PAD, b_pad=_DWEIGHT_B_PAD,
+        vectorize=int(bool(vectorize)),
         **vendor,
     )
+
+
+def get_compiled_backward_dweight_kernel(shape_meta: ConvShapeMeta):
+    key = shape_meta.cache_key
+    if key in _CONV_BACKWARD_DWEIGHT_CACHE:
+        return _CONV_BACKWARD_DWEIGHT_CACHE[key]
+
+    source = render_dweight_source(shape_meta)
 
     try:
         module = config.cp.RawModule(code=source, options=_COMPILE_OPTIONS)
@@ -291,9 +397,9 @@ def get_compiled_backward_dweight_kernel(shape_meta: ConvShapeMeta):
         _CONV_BACKWARD_DWEIGHT_CACHE[key] = None
         return None
 
-    threads_per_block = (block_tile_m // _WMMA_DIM) * (block_tile_n // _WMMA_DIM) * vendor['warp_size']
+    block_tile_m, block_tile_n = _dweight_tiles(shape_meta)
     launch_meta = dict(
-        block=(threads_per_block,),
+        block=(threads_per_block(block_tile_m, block_tile_n),),
         block_tile_m=block_tile_m,
         block_tile_n=block_tile_n,
     )

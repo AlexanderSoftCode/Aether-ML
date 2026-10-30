@@ -313,6 +313,58 @@ class TestConvGpuParity(ConvLayerTestBase):
         self._run_dweight_kernel_parity(S=2, spatial=(8, 8), in_channels=8, out_channels=84)
         self._run_dinput_kernel_parity(S=2, spatial=(8, 8), in_channels=84, out_channels=8)
 
+    def test_conv_gpu_forward_view_inputs_match_contiguous(self):
+        """Forward stages 16-byte vectors, so a view input is copied before launch.
+
+        A 2-byte-offset fp16 slice breaks the alignment, a transposed view the
+        contiguity; both must give the output of a fresh contiguous copy.
+        """
+        if self.backend_name != 'cupy':
+            self.skipTest("CuPy backend required for GPU kernel tests")
+        from aether.custom_kernels import conv_kernel
+        if not conv_kernel.get_is_conv_gpu_available():
+            self.skipTest("Matrix-core GPU kernels not available on this device")
+
+        xp = self.xp
+        layer = self._make_same_layer((8, 8), (3, 3), (1, 1), in_channels=16, out_channels=16)
+        x = xp.random.randn(2, 8, 8, 16).astype(xp.float16)
+
+        buffer = xp.empty(x.size + 1, dtype=xp.float16)
+        misaligned = buffer[1:].reshape(x.shape)
+        misaligned[...] = x
+        self.assertNotEqual(misaligned.data.ptr % 16, 0)
+        transposed = xp.ascontiguousarray(x.transpose(0, 2, 1, 3)).transpose(0, 2, 1, 3)
+        self.assertFalse(transposed.flags.c_contiguous)
+
+        expected = layer._forward_gpu(x, training=False).copy()
+        for name, view in (("misaligned", misaligned), ("transposed", transposed)):
+            with self.subTest(view=name):
+                xp.testing.assert_array_equal(layer._forward_gpu(view, training=False), expected)
+
+    def test_conv_gpu_forward_input_dtypes_round_like_astype(self):
+        """fp32 is converted in the kernel, fp64 goes through fp32 first.
+
+        Either way the operand the matrix cores see must be exactly what the
+        old astype(float16) path produced, so the outputs match bit for bit.
+        C_in = 3 takes the scalar gather, C_in = 16 the vector one.
+        """
+        if self.backend_name != 'cupy':
+            self.skipTest("CuPy backend required for GPU kernel tests")
+        from aether.custom_kernels import conv_kernel
+        if not conv_kernel.get_is_conv_gpu_available():
+            self.skipTest("Matrix-core GPU kernels not available on this device")
+
+        xp = self.xp
+        for in_channels in (3, 16):
+            with self.subTest(in_channels=in_channels):
+                layer = self._make_same_layer((8, 8), (3, 3), (1, 1),
+                                              in_channels=in_channels, out_channels=16)
+                x64 = xp.random.randn(2, 8, 8, in_channels)
+                x32 = x64.astype(xp.float32)
+                expected = layer._forward_gpu(x32.astype(xp.float16), training=False).copy()
+                xp.testing.assert_array_equal(layer._forward_gpu(x32, training=False), expected)
+                xp.testing.assert_array_equal(layer._forward_gpu(x64, training=False), expected)
+
     def test_backward_fallback_on_forward_compile_failure(self):
         """Regression: when forward GPU kernel fails, backward must also fall back.
 

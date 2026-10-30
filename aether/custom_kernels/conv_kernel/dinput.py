@@ -4,7 +4,6 @@ from string import Template
 import aether.config as config
 from aether.custom_kernels.conv_kernel.common import (
     _BLOCK_TILE_M,
-    _BLOCK_TILE_N,
     _COMPILE_OPTIONS,
     _CONV_CUDA,
     _CONV_HIP,
@@ -12,6 +11,8 @@ from aether.custom_kernels.conv_kernel.common import (
     ConvLaunchPlan,
     ConvShapeMeta,
     _m_total,
+    choose_block_tile_n,
+    threads_per_block,
 )
 
 CNN_BACKWARD_DINPUT_TEMPLATE = Template(r'''
@@ -46,6 +47,16 @@ $hip_include
 #define WARPS_N (BLOCK_TILE_N / WMMA_N)
 #define WARP_SIZE $warp_size
 #define THREADS (WARPS_M * WARPS_N * WARP_SIZE)
+
+// 16-byte staging: a lane moves 8 consecutive c_out (one uint4) of one tap
+// when C_OUT keeps every 8-aligned k chunk inside one tap. c_out runs along k
+// in both operands, so A (dvalues) and B (weights) vectorize together.
+// Otherwise both are staged one element per lane.
+#define VEC 8
+#define VEC_K ($vectorize && C_OUT % VEC == 0)
+#define A_VEC_THREADS (BLOCK_TILE_M * WMMA_K / VEC)
+#define B_VEC_THREADS (BLOCK_TILE_N * WMMA_K / VEC)
+static_assert(A_VEC_THREADS + B_VEC_THREADS <= THREADS, "vector staging needs a lane per A and B chunk");
 
 // Trip count of the A staging loop. Each lane keeps one hoisted addressing
 // triple per pass, so this has to be a compile-time constant.
@@ -93,14 +104,36 @@ extern "C" __global__ void __launch_bounds__(THREADS) conv_backward_dinput_wmma(
     const bool warp_live = warp_row < WARPS_M && warp_col < WARPS_N
                         && n_tile_start + warp_col * WMMA_N < C_IN;
 
-    __shared__ half As[BLOCK_TILE_M][WMMA_K + 8];
-    __shared__ half Bs[WMMA_K][BLOCK_TILE_N + 8];
+    __shared__ alignas(32) half As[BLOCK_TILE_M][WMMA_K + 8];
+#if VEC_K
+    // B is staged transposed, [n][k], so a lane's 8 c_out land contiguous in
+    // LDS; the col-major fragment reads element (k, n) back as Bs[n][k].
+    __shared__ alignas(32) half Bs[BLOCK_TILE_N][WMMA_K + 8];
+    fragment<$matrix_b_tag, WMMA_M, WMMA_N, WMMA_K, half, $frag_layout_b_col> b_frag;
+#else
+    __shared__ alignas(32) half Bs[WMMA_K][BLOCK_TILE_N + 8];
+    fragment<$matrix_b_tag, WMMA_M, WMMA_N, WMMA_K, half, $frag_layout_b> b_frag;
+#endif
 
     fragment<$matrix_a_tag, WMMA_M, WMMA_N, WMMA_K, half, $frag_layout_a> a_frag;
-    fragment<$matrix_b_tag, WMMA_M, WMMA_N, WMMA_K, half, $frag_layout_b> b_frag;
     fragment<$accumulator_tag, WMMA_M, WMMA_N, WMMA_K, float> acc_frag;
     fill_fragment(acc_frag, 0.0f);
 
+#if VEC_K
+    // A lane's pixel is fixed for the whole K loop, so decompose it once.
+    const bool a_lane = threadIdx.x < A_VEC_THREADS;
+    const int a_m  = threadIdx.x / (WMMA_K / VEC);
+    const int a_k8 = (threadIdx.x % (WMMA_K / VEC)) * VEC;
+    const long long a_m_global = m_tile_start + a_m;
+    const bool a_valid = a_lane && a_m_global < M_class;
+    int a_s = 0, a_hob = 0, a_wob = 0;
+    if (a_valid) {
+        a_s = (int)(a_m_global / HW_CLASS);
+        const int rem = (int)(a_m_global % HW_CLASS);
+        a_hob = base_qh + rem / NW;
+        a_wob = base_qw + rem % NW;
+    }
+#else
     int a_local_m[A_PASSES];
     int a_valid[A_PASSES];
     int a_s[A_PASSES];
@@ -125,11 +158,46 @@ extern "C" __global__ void __launch_bounds__(THREADS) conv_backward_dinput_wmma(
             a_wob[p] = base_qw + rem % NW;
         }
     }
+#endif
+
+#if VEC_K
+    // B lanes follow the A lanes; each owns 8 c_out of one c_in column.
+    const bool b_lane = threadIdx.x >= A_VEC_THREADS && threadIdx.x < A_VEC_THREADS + B_VEC_THREADS;
+    const int b_n  = (threadIdx.x - A_VEC_THREADS) / (WMMA_K / VEC);
+    const int b_k8 = ((threadIdx.x - A_VEC_THREADS) % (WMMA_K / VEC)) * VEC;
+    const bool b_n_valid = b_lane && n_tile_start + b_n < C_IN;
+#endif
 
     const int num_k_tiles = (K_GATHER + WMMA_K - 1) / WMMA_K;
 
     for (int kt = 0; kt < num_k_tiles; ++kt) {
 
+#if VEC_K
+        if (a_lane) {
+            // K_GATHER is a multiple of 8, so the chunk is all in range or all out.
+            const int k_global = kt * WMMA_K + a_k8;
+            uint4 val = {0u, 0u, 0u, 0u};
+            if (a_valid && k_global < K_GATHER) {
+                const int c_out = k_global % C_OUT;
+                const int t_w   = (k_global / C_OUT) % TAPS_W;
+                const int t_h   = k_global / C_OUT_TAPSW;
+
+                const int fh    = r_h + t_h * STR_H;
+                const int fw    = r_w + t_w * STR_W;
+                const int h_out = a_hob - t_h;
+                const int w_out = a_wob - t_w;
+
+                if (fh < F_H && fw < F_W &&
+                    h_out >= 0 && h_out < H_OUT &&
+                    w_out >= 0 && w_out < W_OUT) {
+                    const long long dv_idx =
+                        (((long long)a_s * H_OUT + h_out) * W_OUT + w_out) * C_OUT + c_out;
+                    val = *reinterpret_cast<const uint4*>(&dvalues[dv_idx]);
+                }
+            }
+            *reinterpret_cast<uint4*>(&As[a_m][a_k8]) = val;
+        }
+#else
         #pragma unroll
         for (int p = 0; p < A_PASSES; ++p) {
             const int idx = threadIdx.x + p * THREADS;
@@ -159,7 +227,29 @@ extern "C" __global__ void __launch_bounds__(THREADS) conv_backward_dinput_wmma(
             }
             As[a_local_m[p]][local_k] = val;
         }
+#endif
 
+#if VEC_K
+        if (b_lane) {
+            const int k_global = kt * WMMA_K + b_k8;
+            uint4 val = {0u, 0u, 0u, 0u};
+            if (b_n_valid && k_global < K_GATHER) {
+                const int c_out = k_global % C_OUT;
+                const int t_w   = (k_global / C_OUT) % TAPS_W;
+                const int t_h   = k_global / C_OUT_TAPSW;
+
+                const int fh = r_h + t_h * STR_H;
+                const int fw = r_w + t_w * STR_W;
+
+                if (fh < F_H && fw < F_W) {
+                    const long long w_idx =
+                        (((long long)fh * F_W + fw) * C_IN + n_tile_start + b_n) * C_OUT + c_out;
+                    val = *reinterpret_cast<const uint4*>(&weight_fp16[w_idx]);
+                }
+            }
+            *reinterpret_cast<uint4*>(&Bs[b_n][b_k8]) = val;
+        }
+#else
         for (int idx = threadIdx.x; idx < WMMA_K * BLOCK_TILE_N; idx += blockDim.x) {
             const int local_k = idx % WMMA_K;
             const int local_n = idx / WMMA_K;
@@ -183,12 +273,18 @@ extern "C" __global__ void __launch_bounds__(THREADS) conv_backward_dinput_wmma(
             }
             Bs[local_k][local_n] = val;
         }
+#endif
 
         __syncthreads();
 
         if (warp_live) {
             load_matrix_sync(a_frag, &As[warp_row * WMMA_M][0], WMMA_K + 8);
+#if VEC_K
+            // col_major: element (k, n) == ptr[k + n * ldm] == Bs[n][k]
+            load_matrix_sync(b_frag, &Bs[warp_col * WMMA_N][0], WMMA_K + 8);
+#else
             load_matrix_sync(b_frag, &Bs[0][warp_col * WMMA_N], BLOCK_TILE_N + 8);
+#endif
             mma_sync(acc_frag, a_frag, b_frag, acc_frag);
         }
 
@@ -225,13 +321,16 @@ extern "C" __global__ void __launch_bounds__(THREADS) conv_backward_dinput_wmma(
 _CONV_BACKWARD_DINPUT_CACHE = {}
 
 
-def get_compiled_backward_dinput_kernel(shape_meta: ConvShapeMeta):
-    key = shape_meta.cache_key
-    if key in _CONV_BACKWARD_DINPUT_CACHE:
-        return _CONV_BACKWARD_DINPUT_CACHE[key]
+def _dinput_tiles(shape_meta: ConvShapeMeta):
+    # dX = dY * W^T: the GEMM N axis is C_in.
+    return _BLOCK_TILE_M, choose_block_tile_n(shape_meta.C_in)
 
+
+def render_dinput_source(shape_meta: ConvShapeMeta, vectorize=True):
+    """CUDA/HIP source for one shape. vectorize=False forces the scalar staging."""
     vendor = _CONV_HIP if shape_meta.is_hip else _CONV_CUDA
-    source = CNN_BACKWARD_DINPUT_TEMPLATE.substitute(
+    block_tile_m, block_tile_n = _dinput_tiles(shape_meta)
+    return CNN_BACKWARD_DINPUT_TEMPLATE.substitute(
         c_in=shape_meta.C_in, c_out=shape_meta.C_out,
         f_h=shape_meta.fH, f_w=shape_meta.fW,
         str_h=shape_meta.sH, str_w=shape_meta.sW,
@@ -239,9 +338,18 @@ def get_compiled_backward_dinput_kernel(shape_meta: ConvShapeMeta):
         h_in=shape_meta.H_in, w_in=shape_meta.W_in,
         h_out=shape_meta.H_out, w_out=shape_meta.W_out,
         wmma_dim=_WMMA_DIM,
-        block_tile_m=_BLOCK_TILE_M, block_tile_n=_BLOCK_TILE_N,
+        block_tile_m=block_tile_m, block_tile_n=block_tile_n,
+        vectorize=int(bool(vectorize)),
         **vendor,
     )
+
+
+def get_compiled_backward_dinput_kernel(shape_meta: ConvShapeMeta):
+    key = shape_meta.cache_key
+    if key in _CONV_BACKWARD_DINPUT_CACHE:
+        return _CONV_BACKWARD_DINPUT_CACHE[key]
+
+    source = render_dinput_source(shape_meta)
 
     try:
         module = config.cp.RawModule(code=source, options=_COMPILE_OPTIONS)
@@ -251,11 +359,11 @@ def get_compiled_backward_dinput_kernel(shape_meta: ConvShapeMeta):
         _CONV_BACKWARD_DINPUT_CACHE[key] = None
         return None
 
-    threads_per_block = (_BLOCK_TILE_M // _WMMA_DIM) * (_BLOCK_TILE_N // _WMMA_DIM) * vendor['warp_size']
+    block_tile_m, block_tile_n = _dinput_tiles(shape_meta)
     launch_meta = dict(
-        block=(threads_per_block,),
-        block_tile_m=_BLOCK_TILE_M,
-        block_tile_n=_BLOCK_TILE_N,
+        block=(threads_per_block(block_tile_m, block_tile_n),),
+        block_tile_m=block_tile_m,
+        block_tile_n=block_tile_n,
     )
 
     _CONV_BACKWARD_DINPUT_CACHE[key] = (kernel, launch_meta)
