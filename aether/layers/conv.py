@@ -29,18 +29,21 @@ class Conv2d(Layer):
     Warns
     -----
     UserWarning
-        If the configured ``precision_policy`` requests a compute precision
-        that does not match the active execution path (e.g., requesting a dtype
-        other than ``float16`` when bound to the WMMA matrix-core path, or
-        requesting non-``float32`` when falling back to strided CPU/GPU kernels).
+        If the configured ``precision_policy`` requests ``float32`` or
+        ``float64`` while the WMMA matrix-core path is available: the layer
+        then binds the much slower strided float32 fallback (``float64`` is not
+        honored, float32 is the most it computes in).
+        If it requests a dtype the bound path cannot deliver otherwise (e.g.
+        ``float16`` or ``float64`` on the strided CPU/GPU fallback).
 
     Notes
     -----
     Expected input shape: ``(batch_size, height, width, in_channels)``
     Output shape: ``(batch_size, out_height, out_width, out_channels)``
 
-    Conv2d's compute dtype is bounded to fp16 as WMMA kernels can't take >fp16
-    calculations, instead layer will use the fallback vectorized path.
+    Unless a precision is set, on a GPU the layer uses fp16 WMMA kernels
+    (float32 accumulate). WMMA can't take >fp16 operands, so an explicit
+    ``float32`` request uses the slower fallback vectorized path instead.
     """
 
     def __init__(self, in_channels, out_channels = 1, filter_size = (3, 3), stride = (1, 1), padding = "same", l1=(), l2=()):
@@ -108,7 +111,8 @@ class Conv2d(Layer):
         return self.output_shape
     def _compile_for_device(self, device):
         """Triggered by Model.to(device) to bind the matrix-core path when available."""
-        if device == 'cupy' and conv_kernel.get_is_conv_gpu_available():
+        # An explicit float32/float64 request opts out of the fp16 matrix cores.
+        if self._wmma_available(device) and self._requested_dtype() not in ('float32', 'float64'):
             self.forward = self._forward_gpu
             self.backward = self._backward_gpu
         else:
@@ -120,17 +124,24 @@ class Conv2d(Layer):
         # Covers set_precision() -> to(); the binding is only knowable here.
         self._warn_if_precision_ignored()
 
+    @staticmethod
+    def _wmma_available(device):
+        return device == 'cupy' and conv_kernel.get_is_conv_gpu_available()
+
+    def _requested_dtype(self):
+        return self.precision_policy.compute_dtype_name if self.precision_policy else None
+
     def _apply_precision(self, policy):
         """
-        Called on Model.set_precision(). Conv2d's kernels pin their own operand
-        dtype, so the policy is stored for introspection/serialization only --
-        _warn_if_precision_ignored is what keeps that from being silent.
+        Called on Model.set_precision(). The policy is stored for serialization,
+        and a compiled layer re-binds its path, since an explicit float32/float64
+        request moves it off the matrix cores (and float16 / None back on).
         """
         self.precision_policy = policy or config.DTypePolicy()
         # Before _compile_for_device runs there is no binding to check against,
         # so defer to it rather than warning about a placeholder.
         if self._compiled_device is not None:
-            self._warn_if_precision_ignored()
+            self._compile_for_device(self._compiled_device)
 
     def _effective_compute_dtype(self):
         """The dtype this layer actually multiplies in, read off the live binding."""
@@ -142,17 +153,19 @@ class Conv2d(Layer):
     def _warn_if_precision_ignored(self):
         """
         Warn once per (bound path, requested dtype) when the precision policy
-        asks for something this layer's kernels can't deliver. Fires at bind
+        asks for something this layer can't deliver as requested. Fires at bind
         time only -- never from forward/backward.
         """
-        requested = (
-            self.precision_policy.compute_dtype_name if self.precision_policy else None
-        )
+        requested = self._requested_dtype()
         if requested is None:
             return
 
         effective = self._effective_compute_dtype()
-        if requested == effective:
+        # float32/float64 deliberately left the matrix cores: honored, but slow.
+        slow_by_request = (
+            requested in ('float32', 'float64') and self._wmma_available(self._compiled_device)
+        )
+        if requested == effective and not slow_by_request:
             self._precision_warned_key = None
             return
 
@@ -162,6 +175,20 @@ class Conv2d(Layer):
         if key == self._precision_warned_key:
             return
         self._precision_warned_key = key
+
+        if slow_by_request:
+            cap = (
+                " Conv2d computes in float32 at most, so float64 is not honored."
+                if requested == 'float64' else ""
+            )
+            warnings.warn(
+                f"[aether] Conv2d: precision policy requests {requested!r}, so this "
+                f"layer uses the strided float32 fallback path instead of the "
+                f"float16 matrix-core path.{cap} THIS IS MUCH SLOWER; for the fast "
+                f"path use set_precision('float16') or leave it unset.",
+                UserWarning,
+            )
+            return
 
         path = (
             "the matrix-core path, whose WMMA kernels take float16 operands at "
