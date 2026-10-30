@@ -13,10 +13,14 @@ class TestConvKernelCompileFallback(base_case.AetherBaseTestCase):
         H_in=7, W_in=5, C_in=3, C_out=6, fH=3, fW=3, sH=1, sW=1,
         pad_h=0, pad_w=0, H_out=5, W_out=3, is_hip=config.IS_HIP,
     )
+    # (getter, cache, key): forward also keys on its input dtype.
     GETTERS = (
-        (conv_kernel.get_compiled_forward_conv_kernel, conv_kernel._CONV_FORWARD_KERNEL_CACHE),
-        (conv_kernel.get_compiled_backward_dweight_kernel, conv_kernel._CONV_BACKWARD_DWEIGHT_CACHE),
-        (conv_kernel.get_compiled_backward_dinput_kernel, conv_kernel._CONV_BACKWARD_DINPUT_CACHE),
+        (conv_kernel.get_compiled_forward_conv_kernel, conv_kernel._CONV_FORWARD_KERNEL_CACHE,
+         conv_kernel.forward_cache_key(SHAPE_META)),
+        (conv_kernel.get_compiled_backward_dweight_kernel, conv_kernel._CONV_BACKWARD_DWEIGHT_CACHE,
+         SHAPE_META.cache_key),
+        (conv_kernel.get_compiled_backward_dinput_kernel, conv_kernel._CONV_BACKWARD_DINPUT_CACHE,
+         SHAPE_META.cache_key),
     )
 
     def setUp(self):
@@ -24,8 +28,7 @@ class TestConvKernelCompileFallback(base_case.AetherBaseTestCase):
         if self.backend_name != "cupy":
             self.skipTest("CuPy backend required")
 
-    def _call_with_raw_module_raising(self, getter, cache, error):
-        key = self.SHAPE_META.cache_key
+    def _call_with_raw_module_raising(self, getter, cache, key, error):
         cache.pop(key, None)
         self.addCleanup(cache.pop, key, None)
         with mock.patch.object(config.cp, "RawModule", side_effect=error):
@@ -36,14 +39,14 @@ class TestConvKernelCompileFallback(base_case.AetherBaseTestCase):
             config.cp.cuda.compiler.CompileException("bad source", "", "conv", ()),
             config.cp.cuda.driver.CUDADriverError(1),
         )
-        for getter, cache in self.GETTERS:
+        for getter, cache, key in self.GETTERS:
             for error in errors:
                 with self.subTest(getter=getter.__name__, error=type(error).__name__), \
                      self.assertWarns(UserWarning):
-                    result = self._call_with_raw_module_raising(getter, cache, error)
+                    result = self._call_with_raw_module_raising(getter, cache, key, error)
                     self.assertIsNone(result)
-                    self.assertIn(self.SHAPE_META.cache_key, cache)
-                    self.assertIsNone(cache[self.SHAPE_META.cache_key])
+                    self.assertIn(key, cache)
+                    self.assertIsNone(cache[key])
 
     def test_cast_kernel_failure_warns_and_returns_none(self):
         cache, key = conv_kernel._CONV_BACKWARD_CAST_CACHE, config.IS_HIP
@@ -59,12 +62,12 @@ class TestConvKernelCompileFallback(base_case.AetherBaseTestCase):
         self.assertIsNone(cache[key])
 
     def test_python_error_is_not_swallowed(self):
-        for getter, cache in self.GETTERS:
+        for getter, cache, key in self.GETTERS:
             with self.subTest(getter=getter.__name__):
                 self.assertRaises(
-                    TypeError, self._call_with_raw_module_raising, getter, cache, TypeError("bug")
+                    TypeError, self._call_with_raw_module_raising, getter, cache, key, TypeError("bug")
                 )
-                self.assertNotIn(self.SHAPE_META.cache_key, cache)
+                self.assertNotIn(key, cache)
 
 
 base_case.register_test_suites(globals(), template_cls=TestConvKernelCompileFallback)

@@ -1,6 +1,8 @@
 import unittest
 from unittest import mock
 
+import numpy as np
+
 import aether.config as config
 import tests.base_case as base_case
 from aether.custom_kernels import conv_kernel
@@ -29,6 +31,12 @@ class TestChooseBlockTileN(unittest.TestCase):
         self.assertEqual(common.threads_per_block(64, 32), 256)
         self.assertEqual(common.threads_per_block(32, 32), 128)
 
+    def test_forward_reads_fp32_only_on_the_scalar_gather(self):
+        for C_in, expected in ((3, np.float32), (12, np.float32), (8, np.float16), (64, np.float16)):
+            with self.subTest(C_in=C_in):
+                meta = conv_kernel.ConvShapeMeta.create((8, 8, C_in), 16, (3, 3), (1, 1), "same", is_hip=False)
+                self.assertIs(conv_kernel.choose_forward_input_dtype(meta), expected)
+
 
 class TestConvNarrowTileParity(base_case.AetherBaseTestCase):
     """The narrow tiles against the 64x64 tile on the same operands.
@@ -56,9 +64,9 @@ class TestConvNarrowTileParity(base_case.AetherBaseTestCase):
             self.skipTest("Matrix-core GPU kernels not available on this device")
         self.xp.random.seed(0)
 
-    def _wide(self, plan, module, tiles_fn, render, name, grid):
+    def _wide(self, plan, module, tiles_fn, render, name, grid, **render_kwargs):
         with mock.patch.object(module, tiles_fn, return_value=(64, 64)):
-            source = render(plan.shape_meta)
+            source = render(plan.shape_meta, **render_kwargs)
         kernel = config.cp.RawModule(code=source, options=common._COMPILE_OPTIONS).get_function(name)
         return common.ConvLaunchPlan(
             kernel, grid, (common.threads_per_block(64, 64),), plan.M_total, plan.shape_meta
@@ -76,9 +84,10 @@ class TestConvNarrowTileParity(base_case.AetherBaseTestCase):
             n_tiles = lambda n: -(-n // 64)
 
             with self.subTest(kernel="forward", C_in=C_in, C_out=C_out):
-                plan = conv_kernel.plan_forward_launch(meta, S)
+                plan = conv_kernel.plan_forward_launch(meta, S, xp.float16)
                 wide = self._wide(plan, forward, "_forward_tiles", forward.render_forward_source,
-                                  "conv_forward_wmma", (plan.grid[0], n_tiles(C_out)))
+                                  "conv_forward_wmma", (plan.grid[0], n_tiles(C_out)),
+                                  input_dtype=xp.float16)
                 out, ref = xp.empty(out_shape, xp.float32), xp.empty(out_shape, xp.float32)
                 plan(x, w, bias, out)
                 wide(x, w, bias, ref)

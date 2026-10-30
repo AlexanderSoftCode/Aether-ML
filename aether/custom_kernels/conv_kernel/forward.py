@@ -1,6 +1,8 @@
 import warnings
 from string import Template
 
+import numpy as np
+
 import aether.config as config
 from aether.custom_kernels.conv_kernel.common import (
     _BLOCK_TILE_M,
@@ -68,8 +70,30 @@ using $wmma_ns::mma_sync;
 using $wmma_ns::fill_fragment;
 using $wmma_ns::fragment;
 
+// The input is read as IN_T (half, or float converted on the fly, which
+// rounds exactly as astype(float16) would) so fp32 activations skip a cast pass.
+typedef $in_t IN_T;
+
+__device__ __forceinline__ half to_half(half v)  { return v; }
+__device__ __forceinline__ half to_half(float v) { return __float2half(v); }
+
+__device__ __forceinline__ uint4 load_half8(const half* p) {
+    return *reinterpret_cast<const uint4*>(p);
+}
+__device__ __forceinline__ uint4 load_half8(const float* p) {
+    const float4 lo = reinterpret_cast<const float4*>(p)[0];
+    const float4 hi = reinterpret_cast<const float4*>(p)[1];
+    uint4 out;
+    half2* h = reinterpret_cast<half2*>(&out);
+    h[0] = __floats2half2_rn(lo.x, lo.y);
+    h[1] = __floats2half2_rn(lo.z, lo.w);
+    h[2] = __floats2half2_rn(hi.x, hi.y);
+    h[3] = __floats2half2_rn(hi.z, hi.w);
+    return out;
+}
+
 extern "C" __global__ void conv_forward_wmma(
-    const half* __restrict__ input,        // [S, H_IN, W_IN, C_IN]
+    const IN_T* __restrict__ input,        // [S, H_IN, W_IN, C_IN]
     const half* __restrict__ weight_fp16,  // [K_TOTAL, C_OUT]
     const float* __restrict__ bias,        // [C_OUT]
     float* __restrict__ output,            // [S, H_OUT, W_OUT, C_OUT]
@@ -126,8 +150,7 @@ extern "C" __global__ void conv_forward_wmma(
                 const int h_in = a_h0 + fh;
                 const int w_in = a_w0 + fw;
                 if (h_in >= 0 && h_in < H_IN && w_in >= 0 && w_in < W_IN) {
-                    val = *reinterpret_cast<const uint4*>(
-                        &input[a_base + ((long long)h_in * W_IN + w_in) * C_IN + c_in]);
+                    val = load_half8(&input[a_base + ((long long)h_in * W_IN + w_in) * C_IN + c_in]);
                 }
             }
             *reinterpret_cast<uint4*>(&As[a_m][a_k8]) = val;
@@ -155,7 +178,7 @@ extern "C" __global__ void conv_forward_wmma(
 
                 if (h_in >= 0 && h_in < H_IN && w_in >= 0 && w_in < W_IN) {
                     const long long in_idx = (((long long)s * H_IN + h_in) * W_IN + w_in) * C_IN + c_in;
-                    val = input[in_idx];
+                    val = to_half(input[in_idx]);
                 }
             }
             As[local_m][local_k] = val;
@@ -229,8 +252,34 @@ def _forward_tiles(shape_meta: ConvShapeMeta):
     return _BLOCK_TILE_M, choose_block_tile_n(shape_meta.C_out)
 
 
-def render_forward_source(shape_meta: ConvShapeMeta, vectorize=True):
-    """CUDA/HIP source for one shape. vectorize=False forces the scalar staging."""
+_INPUT_TYPES = {np.dtype(np.float16): 'half', np.dtype(np.float32): 'float'}
+
+
+def _input_type(input_dtype):
+    try:
+        return _INPUT_TYPES[np.dtype(input_dtype)]
+    except KeyError:
+        raise TypeError(
+            f"conv_forward_wmma reads float16 or float32 inputs, not {np.dtype(input_dtype)}"
+        ) from None
+
+
+def choose_forward_input_dtype(shape_meta: ConvShapeMeta):
+    """The dtype forward should be handed an fp32 activation in.
+
+    The scalar gather (C_in % 8 != 0) converts fp32 for free, which beats a
+    separate astype pass. The 16-byte gather reads each element ~F_H*F_W
+    times, so doubling its bytes costs more than one cast at copy bandwidth
+    (RTX 3050, CIFAR-10 convs 03-16: 3.38 vs 3.27 ms summed): it takes fp16.
+    """
+    return np.float16 if shape_meta.C_in % 8 == 0 else np.float32
+
+
+def render_forward_source(shape_meta: ConvShapeMeta, input_dtype=np.float32, vectorize=True):
+    """CUDA/HIP source for one shape and input dtype (float16 or float32).
+
+    vectorize=False forces the scalar staging.
+    """
     vendor = _CONV_HIP if shape_meta.is_hip else _CONV_CUDA
     block_tile_m, block_tile_n = _forward_tiles(shape_meta)
     return CNN_FORWARD_TEMPLATE.substitute(
@@ -243,16 +292,21 @@ def render_forward_source(shape_meta: ConvShapeMeta, vectorize=True):
         wmma_dim=_WMMA_DIM,
         block_tile_m=block_tile_m, block_tile_n=block_tile_n,
         vectorize=int(bool(vectorize)),
+        in_t=_input_type(input_dtype),
         **vendor,
     )
 
 
-def get_compiled_forward_conv_kernel(shape_meta: ConvShapeMeta):
-    key = shape_meta.cache_key
+def forward_cache_key(shape_meta: ConvShapeMeta, input_dtype=np.float32):
+    return (shape_meta.cache_key, _input_type(input_dtype))
+
+
+def get_compiled_forward_conv_kernel(shape_meta: ConvShapeMeta, input_dtype=np.float32):
+    key = forward_cache_key(shape_meta, input_dtype)
     if key in _CONV_FORWARD_KERNEL_CACHE:
         return _CONV_FORWARD_KERNEL_CACHE[key]
 
-    source = render_forward_source(shape_meta)
+    source = render_forward_source(shape_meta, input_dtype)
 
     try:
         module = config.cp.RawModule(code=source, options=_COMPILE_OPTIONS)
@@ -277,9 +331,12 @@ def get_compiled_forward_conv_kernel(shape_meta: ConvShapeMeta):
     return _CONV_FORWARD_KERNEL_CACHE[key]
 
 
-def plan_forward_launch(shape_meta: ConvShapeMeta, S: int):
-    """conv_forward_wmma(input_fp16, weight_fp16, bias, output) -> plan."""
-    compiled = get_compiled_forward_conv_kernel(shape_meta)
+def plan_forward_launch(shape_meta: ConvShapeMeta, S: int, input_dtype=np.float32):
+    """conv_forward_wmma(input, weight_fp16, bias, output) -> plan.
+
+    input is contiguous, 16-byte aligned, and of input_dtype (float16 or float32).
+    """
+    compiled = get_compiled_forward_conv_kernel(shape_meta, input_dtype)
     if compiled is None:
         return None
     kernel, launch = compiled

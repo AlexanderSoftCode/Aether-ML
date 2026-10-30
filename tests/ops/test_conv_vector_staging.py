@@ -32,8 +32,8 @@ class TestConvVectorStaging(base_case.AetherBaseTestCase):
             self.skipTest("Matrix-core GPU kernels not available on this device")
         self.xp.random.seed(0)
 
-    def _scalar(self, plan, render, name):
-        source = render(plan.shape_meta, vectorize=False)
+    def _scalar(self, plan, render, name, **render_kwargs):
+        source = render(plan.shape_meta, vectorize=False, **render_kwargs)
         kernel = config.cp.RawModule(code=source, options=common._COMPILE_OPTIONS).get_function(name)
         return common.ConvLaunchPlan(kernel, plan.grid, plan.block, plan.M_total, plan.shape_meta)
 
@@ -47,18 +47,27 @@ class TestConvVectorStaging(base_case.AetherBaseTestCase):
         return S, meta, x, w, dy
 
     def test_forward_matches_scalar_staging(self):
+        """Every input dtype the kernel reads gives the fp16-input output exactly."""
         xp = self.xp
         for case in self.CASES:
-            with self.subTest(case=case):
-                S, meta, x, w, _ = self._operands(case)
-                bias = xp.random.randn(meta.C_out).astype(xp.float32)
-                plan = conv_kernel.plan_forward_launch(meta, S)
-                scalar = self._scalar(plan, forward.render_forward_source, "conv_forward_wmma")
-                out_shape = (S, meta.H_out, meta.W_out, meta.C_out)
-                out, ref = xp.empty(out_shape, xp.float32), xp.empty(out_shape, xp.float32)
-                plan(x, w, bias, out)
-                scalar(x, w, bias, ref)
-                xp.testing.assert_array_equal(out, ref)
+            S, meta, x, w, _ = self._operands(case)
+            bias = xp.random.randn(meta.C_out).astype(xp.float32)
+            out_shape = (S, meta.H_out, meta.W_out, meta.C_out)
+            ref = xp.empty(out_shape, xp.float32)
+            fp16_plan = conv_kernel.plan_forward_launch(meta, S, xp.float16)
+            self._scalar(fp16_plan, forward.render_forward_source, "conv_forward_wmma",
+                         input_dtype=xp.float16)(x, w, bias, ref)
+            for dtype in (xp.float16, xp.float32):
+                with self.subTest(case=case, input_dtype=dtype.__name__):
+                    x_in = x.astype(dtype)
+                    plan = conv_kernel.plan_forward_launch(meta, S, dtype)
+                    scalar = self._scalar(plan, forward.render_forward_source, "conv_forward_wmma",
+                                          input_dtype=dtype)
+                    out, out_scalar = xp.empty(out_shape, xp.float32), xp.empty(out_shape, xp.float32)
+                    plan(x_in, w, bias, out)
+                    scalar(x_in, w, bias, out_scalar)
+                    xp.testing.assert_array_equal(out, ref)
+                    xp.testing.assert_array_equal(out_scalar, ref)
 
     def test_dinput_matches_scalar_staging(self):
         xp = self.xp

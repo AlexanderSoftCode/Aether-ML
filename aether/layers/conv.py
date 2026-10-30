@@ -246,7 +246,15 @@ class Conv2d(Layer):
         S, H_in, W_in, C_in = inputs.shape
 
         shape_meta = self._get_shape_meta((H_in, W_in, C_in))
-        plan = conv_kernel.plan_forward_launch(shape_meta, S)
+        # fp16 is read as is. Anything else is taken as fp32 (rounding fp64 the
+        # same way backward's fp32 cast does), which the kernel either converts
+        # as it gathers or, where a cast pass is cheaper, gets cast to fp16.
+        if inputs.dtype == xp.float16:
+            source, input_dtype = inputs, xp.float16
+        else:
+            source = inputs.astype(xp.float32, copy=False)
+            input_dtype = conv_kernel.choose_forward_input_dtype(shape_meta)
+        plan = conv_kernel.plan_forward_launch(shape_meta, S, input_dtype)
 
         # Fall back if JIT failed or shape isn't supported by Matrix Cores
         if plan is None:
@@ -254,11 +262,11 @@ class Conv2d(Layer):
             self.backward = self._backward_fallback
             return self._forward_fallback(inputs, training)
 
-        inputs_fp16 = xp.ascontiguousarray(inputs, dtype=xp.float16)
+        kernel_inputs = xp.ascontiguousarray(source, dtype=input_dtype)
         # The kernel stages 16-byte vectors; a fresh allocation is aligned, a
         # view into one (e.g. an fp16 slice) may not be.
-        if inputs_fp16.data.ptr % 16:
-            inputs_fp16 = inputs_fp16.copy()
+        if kernel_inputs.data.ptr % 16:
+            kernel_inputs = kernel_inputs.copy()
 
         if not self._fp16_weight_valid:
             self._refresh_fp16_weights(xp)
@@ -267,7 +275,7 @@ class Conv2d(Layer):
             (S, shape_meta.H_out, shape_meta.W_out, self.C_out), dtype=xp.float32
         )
 
-        plan(inputs_fp16, self._fp16_weight_cache, self.biases, self.output)
+        plan(kernel_inputs, self._fp16_weight_cache, self.biases, self.output)
 
         self.inputs = inputs if training else None
         return self.output

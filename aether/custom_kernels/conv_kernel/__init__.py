@@ -30,6 +30,8 @@ from aether.custom_kernels.conv_kernel.dweight import (
 )
 from aether.custom_kernels.conv_kernel.forward import (
     _CONV_FORWARD_KERNEL_CACHE,
+    choose_forward_input_dtype,
+    forward_cache_key,
     get_compiled_forward_conv_kernel,
     plan_forward_launch,
 )
@@ -44,6 +46,8 @@ __all__ = [
     "cast_backward_operands_fp16",
     "choose_block_tile_n",
     "choose_dweight_split_k",
+    "choose_forward_input_dtype",
+    "forward_cache_key",
     "get_compiled_backward_cast_kernel",
     "get_compiled_backward_dinput_kernel",
     "get_compiled_backward_dweight_kernel",
