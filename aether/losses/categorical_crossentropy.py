@@ -126,7 +126,7 @@ class CategoricalCrossEntropy(Loss):
 
     Notes
     -----
-    - **Expected inputs:**
+    - Expected inputs:
         - ``y_pred``: Probability distributions of shape ``(batch_size, n_classes)``.
           Must already be normalized (e.g., via preceding ``SoftMax`` layer).
         - ``y_true``: Target labels as sparse integer indices ``(batch_size,)`` or
@@ -187,11 +187,11 @@ class SoftmaxCategoricalCrossEntropy(Loss):
 
     Notes
     -----
-    - **Expected inputs:**
+    - Expected inputs:
         - ``logits``: Raw, unnormalized activations of shape ``(batch_size, n_classes)``.
         - ``y_true``: Target labels as sparse integer indices ``(batch_size,)`` or
           one-hot distributions ``(batch_size, n_classes)``.
-    - **Graph constraint:** Operates directly on logits; preceding this loss with an
+    - Graph constraint: Operates directly on logits; preceding this loss with an
       explicit ``SoftMax`` layer is prohibited to prevent redundant double normalization.
     """
     prohibited_preceding_layers = (SoftMax,)

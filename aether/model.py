@@ -745,10 +745,9 @@ class Model:
                 Defaults to True.
             print_every (int): Step interval frequency for logging telemetry.
                 Ignored when `verbose=0`.
-            verbose (int, optional): Verbosity mode for training telemetry.
-                - `0`: Silent mode (no output printed).
-                - `1`: Dynamic graphical progress bar with metrics (default).
-                - `2`: Plain text summary per epoch without carriage returns/ANSI escapes.
+            verbose (int, optional): Telemetry verbosity: 0 is silent, 1 shows a dynamic
+                progress bar with metrics (default), 2 prints a plain text summary per epoch
+                without carriage returns or ANSI escapes.
             validation_data (tuple, optional): Raw (X_val, y_val) tuple evaluated per epoch.
             fit_preprocessor (bool, optional): Whether to fit the preprocessor
                 (None=only if unfitted, True=always, False=never).
@@ -911,10 +910,8 @@ class Model:
                 Raw/un-preprocessed when a preprocessing pipeline is attached.
             y (ndarray): Ground truth labels or targets.
             batch_size (int, optional): Mini-batch size. Defaults to None (full-batch).
-            verbose (int | bool, optional): Verbosity mode for evaluation.
-                - `0` / `False`: Silent mode (no output printed).
-                - `1` / `True`: Prints the final evaluation loss and accuracy metrics.
-                Defaults to 1.
+            verbose (int | bool, optional): Verbosity for evaluation: 0 / False is silent,
+                1 / True prints the final evaluation loss and accuracy metrics. Defaults to 1.
         Returns:
             tuple: (val_loss, val_acc) representing the computed validation metrics.
         Raises:

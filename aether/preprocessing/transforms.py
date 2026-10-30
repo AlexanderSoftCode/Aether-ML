@@ -577,9 +577,9 @@ def deserialize(entry: dict | None) -> Preprocess | None:
 
     When is this used?
     ------------------
-    - **Internally:** Called automatically by `Model.load()` to restore attached 
+    - Internally: Called automatically by `Model.load()` to restore attached 
       data preprocessing pipelines from saved `.aether` model archives.
-    - **Standalone:** Called by users to load or transfer preprocessor pipelines 
+    - Standalone: Called by users to load or transfer preprocessor pipelines 
       independently of a model (e.g., loading fitted scalers into external APIs, 
       ETL data workers, or configuration-driven workflows).
 
