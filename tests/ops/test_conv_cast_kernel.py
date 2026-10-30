@@ -51,8 +51,12 @@ class TestConvBackwardCastKernel(base_case.AetherBaseTestCase):
         self.assertEqual(dv16.shape, dvalues.shape)
         self.assertEqual(in16.shape, inputs.shape)
         self.assertTrue((np.abs(dvalues) > 65504).any(), "test data must exercise the clip")
+        self.assertTrue((np.abs(inputs) > 65504).any(), "test data must exercise the overflow")
         np.testing.assert_array_equal(dv16, np.clip(dvalues, -65504, 65504).astype(np.float16))
-        np.testing.assert_array_equal(in16, inputs.astype(np.float16))
+        # The overflow to inf is the behavior under test, so NumPy's warning is expected.
+        with np.errstate(over="ignore"):
+            expected_in16 = inputs.astype(np.float16)
+        np.testing.assert_array_equal(in16, expected_in16)
 
 
 base_case.register_test_suites(globals(), template_cls=TestConvBackwardCastKernel)
