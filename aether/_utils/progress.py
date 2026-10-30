@@ -10,7 +10,8 @@ import re
 import shutil
 import sys
 import time
-from typing import Callable, Literal
+from collections.abc import Callable
+from typing import Literal
 
 from aether._utils.null_objects import _NullProgress
 

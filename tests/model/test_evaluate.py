@@ -1,6 +1,5 @@
 import contextlib
 import io
-import unittest
 
 import numpy as np
 

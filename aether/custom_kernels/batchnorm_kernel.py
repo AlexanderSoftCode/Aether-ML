@@ -281,7 +281,7 @@ _bn_backward_ew = config.build_kernel(
 
 # --- Availability Helper --------------------------------------------------------
 
-def is_gpu_bn_available(variant: str = None) -> bool:
+def is_gpu_bn_available(variant: str | None = None) -> bool:
     """Checks if CuPy hardware support and BatchNorm kernels are available."""
     if variant is None:
         variant, _ = config.resolve_gpu_launch_geometry()

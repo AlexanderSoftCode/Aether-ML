@@ -1,4 +1,3 @@
-import aether.config as config
 import tests.base_case as base_case
 from aether.layers.conv import Conv2d
 from aether.layers.linear import Dense
@@ -275,10 +274,7 @@ class BaseTestOptimizerAdam(base_case.AetherBaseLayerTestCase):
         optimizer.init_params([layer])
         optimizer._compile_for_device("cupy")
 
-        try:
-            optimizer.step()
-        except Exception as e:
-            self.fail(f"CuPy kernel failed during optimizer.step(): {e}")
+        optimizer.step()
 
         self.assertTrue(self.xp.all(self.xp.isfinite(layer.weights)))
         self.assertTrue(self.xp.all(self.xp.isfinite(layer.biases)))

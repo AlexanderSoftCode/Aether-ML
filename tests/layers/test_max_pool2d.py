@@ -244,9 +244,9 @@ class TestMaxPool2d(base_case.AetherBaseLayerTestCase):
 
     def test_build_invalid_padding_raises_value_error(self):
         with self.assertRaises(ValueError):
-            layer = self.make_built_layer(
-                MaxPool2d, 
-                input_shape=self.INPUT_SHAPE[1:], 
+            self.make_built_layer(
+                MaxPool2d,
+                input_shape=self.INPUT_SHAPE[1:],
                 filter_size=(2, 2), stride=(2, 2),
                 padding='not_a_real_padding')
 

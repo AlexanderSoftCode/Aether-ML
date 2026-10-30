@@ -49,7 +49,7 @@ class Loss:
         last_layer = layers[-1]
         if isinstance(last_layer, self.prohibited_preceding_layers):
             prohibited_names = ", ".join(cls.__name__ for cls in self.prohibited_preceding_layers)
-            raise ValueError(
+            raise ValueError(  # noqa: TRY004 - graph errors are a ValueError by contract
                 f"[aether] '{type(self).__name__}' operates directly on unnormalized logits. "
                 f"Do not add an explicit '{prohibited_names}' layer immediately preceding this loss."
             )

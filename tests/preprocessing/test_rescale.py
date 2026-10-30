@@ -1,6 +1,5 @@
 import numpy as np
 
-import aether.config as config
 import tests.base_case as base_case
 from aether.preprocessing.transforms import Rescale
 

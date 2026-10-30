@@ -1,4 +1,3 @@
-import aether.config as config
 import tests.base_case as base_case
 from aether.optimizers.adam import Adam
 from tests.optimizers.adam_base_suite import BaseTestOptimizerAdam
