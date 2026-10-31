@@ -93,7 +93,10 @@ class TestModelSaveBase(base_case.AetherBaseTestCase):
         target = os.path.join(self.temp_dir, "elsewhere.txt")
         with open(target, "wb") as f:
             f.write(b"keep")
-        os.symlink(target, self.save_path)
+        try:
+            os.symlink(target, self.save_path)
+        except OSError as e:
+            self.skipTest(f"symlink creation not permitted here: {e}")
 
         model = Model()
         model.add(Dense(self.NUM_FEATURES, 4))
