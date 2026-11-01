@@ -51,7 +51,9 @@ THEMES = {
         "grid": "#e1e0d9",
         "axis": "#c3c2b7",
         "raw_alpha": 0.18,
-        "series": {"cupy-fused": "#2a78d6", "cupy-fallback": "#eb6834", "numpy-cpu": "#4a3aa7"},
+        "series": {"cupy-fused": "#2a9d5c", "cupy-fallback": "#2a78d6", "numpy-cpu": "#4a3aa7",
+                   "other-gpu-fused": "#5da938"},
+        "stages": {"forward": "#2a9d5c", "backward": "#16643a"},
     },
     "dark": {
         "suffix": "-dark",
@@ -63,14 +65,17 @@ THEMES = {
         "grid": "#2c2c2a",
         "axis": "#383835",
         "raw_alpha": 0.38,
-        "series": {"cupy-fused": "#3987e5", "cupy-fallback": "#d95926", "numpy-cpu": "#9085e9"},
+        "series": {"cupy-fused": "#3dbb74", "cupy-fallback": "#3987e5", "numpy-cpu": "#9085e9",
+                   "other-gpu-fused": "#81d262"},
+        "stages": {"forward": "#3dbb74", "backward": "#9fe8bd"},
     },
 }
 STAGE_LABELS = {"forward": "Forward", "backward": "Backward", "rest": "Everything else"}
 THROUGHPUT_ORDER = ("numpy-cpu", "cupy-fallback", "cupy-fused")
 VRAM_DRAW_ORDER = ("cupy-fallback", "cupy-fused")  # the taller area goes down first
 MIN_LOSS_DROP = 0.25  # a curve that falls less than this didn't converge
-PHASE_LABEL_ROW = {"forward": 0, "loss": 1, "backward": 0, "optimizer": 1}
+DASHES = (0, (2, 1.2))  # in line widths; the legend handle ends on a dash, not a sliver
+PHASE_LABEL_ROW ={"forward": 0, "loss": 1, "backward": 0, "optimizer": 1}
 
 
 def fmt_ms(ms):
@@ -218,8 +223,9 @@ def figure_convergence(paths, other_gpus, theme):
     main_times = [crossing_time(tr, threshold) for tr in main_traces if not is_flat(tr)]
     fastest, slowest = min(main_times), max(main_times)
 
-    other_traces = [read_trace(other["results"][0], f"{other['meta']['gpu']}, fused", "--")
-                    for other in other_gpus]
+    # Another GPU's fused path gets its own lime shade so it doesn't blur into the AMD green.
+    other_traces = [{**read_trace(other["results"][0], f"{other['meta']['gpu']}, fused", DASHES),
+                     "key": "other-gpu-fused"} for other in other_gpus]
     traces = main_traces + other_traces
     # Another GPU that never reaches the line still gets its curve, just no marker.
     crossings = sorted(((crossing_time(tr, threshold), tr) for tr in traces
@@ -374,22 +380,23 @@ def stage_ms(breakdown):
 
 def release_panel(ax, old_version, new_version, old, new, gain, theme):
     # The remainder is small and carries no story, so it stays neutral.
-    colors = {"forward": theme["series"]["cupy-fused"],
-              "backward": theme["series"]["cupy-fallback"],
-              "rest": theme["muted"]}
+    colors = {**theme["stages"], "rest": theme["muted"]}
     ax.grid(axis="x", color=theme["grid"], linewidth=1.0)
     ax.spines["left"].set_visible(False)
-    ax.set_title(f"{new['meta']['gpu']}  ·  {fmt_multiple(gain)} faster", loc="left",
-                 fontsize=SZ_CAPTION, color=theme["primary"], pad=5)
+    ax.set_title(new["meta"]["gpu"], loc="left", fontsize=SZ_CAPTION, fontweight="bold",
+                 color=theme["primary"], pad=5)
     for row, breakdown in ((1, old), (0, new)):
         left = 0.0
         for stage, ms in stage_ms(breakdown).items():
             ax.barh(row, ms, left=left, height=0.42, color=colors[stage],
                     edgecolor=theme["surface"], linewidth=1.0, label=STAGE_LABELS[stage])
             left += ms
-        ax.annotate(f"{fmt_ms(breakdown['baseline_ms']['median'])} ms/step", xy=(left, row),
-                    xytext=(7, 0), textcoords="offset points", va="center",
-                    fontsize=SZ_AXIS, color=theme["primary"])
+        label = f"{fmt_ms(breakdown['baseline_ms']['median'])} ms/step"
+        if row == 0:
+            label += f"  ·  {fmt_multiple(gain)} faster"
+        ax.annotate(label, xy=(left, row), xytext=(7, 0), textcoords="offset points",
+                    va="center", fontsize=SZ_AXIS, color=theme["primary"],
+                    fontweight="bold" if row == 0 else "normal")
     ax.set_yticks([1, 0], [old_version, new_version], color=theme["primary"])
     ax.set_ylim(-0.5, 1.5)
     ax.set_xlim(0, sum(stage_ms(old).values()) * 1.2)
