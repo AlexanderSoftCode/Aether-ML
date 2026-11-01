@@ -105,6 +105,13 @@ def threads_per_block(block_tile_m, block_tile_n):
 # ROCM_PATH would be searched first, so a stale ROCM_PATH could shadow it.
 _COMPILE_OPTIONS = ('-std=c++17',)
 
+# dY is multiplied by this before its fp16 cast and the backward kernels divide
+# it back out of what they write, because per-element gradients can be far below
+# fp16's smallest step (about 6e-8) and would round to 0. A power of two, so
+# neither direction rounds in fp32. It lowers the effective dY clip from +-65504
+# to about +-64.
+GRAD_SCALE = 1024.0
+
 
 # --- Vendor substitution dictionaries --------------------------------------
 

@@ -8,6 +8,7 @@ from aether.custom_kernels.conv_kernel.common import (
     _CONV_CUDA,
     _CONV_HIP,
     _WMMA_DIM,
+    GRAD_SCALE,
     ConvLaunchPlan,
     ConvShapeMeta,
     _m_total,
@@ -51,6 +52,7 @@ $hip_include
 #define W_IN    $w_in
 #define H_OUT   $h_out
 #define W_OUT   $w_out
+#define INV_GRAD_SCALE (1.0f / ${grad_scale}f)
 #define K_TOTAL (F_H * F_W * C_IN)
 #define HW_OUT  (H_OUT * W_OUT)
 #define C_IN_FW (C_IN * F_W)
@@ -311,7 +313,7 @@ extern "C" __global__ void __launch_bounds__(THREADS) conv_backward_dweight_wmma
         const int n_global = n_tile_start + local_n;
 
         if (k_global < K_TOTAL && n_global < C_OUT) {
-            const float val = Cs[local_k][local_n];
+            const float val = Cs[local_k][local_n] * INV_GRAD_SCALE;
             if (gridDim.z > 1) {
                 atomicAdd(&dweights[k_global * C_OUT + n_global], val);
             } else {
@@ -347,7 +349,7 @@ extern "C" __global__ void __launch_bounds__(THREADS) conv_backward_dweight_wmma
     if (blockIdx.x == 0 && threadIdx.x < BLOCK_TILE_N) {
         const int n_global = n_tile_start + threadIdx.x;
         if (n_global < C_OUT) {
-            atomicAdd(&dbiases[n_global], s_bias[threadIdx.x]);
+            atomicAdd(&dbiases[n_global], s_bias[threadIdx.x] * INV_GRAD_SCALE);
         }
     }
 }
@@ -378,6 +380,7 @@ def render_dweight_source(shape_meta: ConvShapeMeta, vectorize=True):
         block_tile_m=block_tile_m, block_tile_n=block_tile_n,
         a_pad=_DWEIGHT_A_PAD, b_pad=_DWEIGHT_B_PAD,
         vectorize=int(bool(vectorize)),
+        grad_scale=GRAD_SCALE,
         **vendor,
     )
 
@@ -410,6 +413,9 @@ def get_compiled_backward_dweight_kernel(shape_meta: ConvShapeMeta):
 
 def plan_dweight_launch(shape_meta: ConvShapeMeta, S: int):
     """conv_backward_dweight_wmma(input_fp16, dvalues_fp16, dweights, dbiases).
+
+    dvalues_fp16 must already be scaled by GRAD_SCALE; dweights/dbiases come out
+    in true units.
 
     Note the 3D grid: gridDim.z carries the split-K slices that make this
     kernel fast. dweights/dbiases must be zeroed by the caller whenever

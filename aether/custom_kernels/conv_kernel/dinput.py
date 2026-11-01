@@ -8,6 +8,7 @@ from aether.custom_kernels.conv_kernel.common import (
     _CONV_CUDA,
     _CONV_HIP,
     _WMMA_DIM,
+    GRAD_SCALE,
     ConvLaunchPlan,
     ConvShapeMeta,
     _m_total,
@@ -30,6 +31,8 @@ $hip_include
 #define W_IN    $w_in
 #define H_OUT   $h_out
 #define W_OUT   $w_out
+
+#define INV_GRAD_SCALE (1.0f / ${grad_scale}f)
 
 #define TAPS_H      ((F_H + STR_H - 1) / STR_H)
 #define TAPS_W      ((F_W + STR_W - 1) / STR_W)
@@ -312,7 +315,7 @@ extern "C" __global__ void __launch_bounds__(THREADS) conv_backward_dinput_wmma(
 
             const long long in_idx =
                 (((long long)s * H_IN + h_in) * W_IN + w_in) * C_IN + c_in;
-            dinputs[in_idx] = Cs[local_m][local_n];
+            dinputs[in_idx] = Cs[local_m][local_n] * INV_GRAD_SCALE;
         }
     }
 }
@@ -340,6 +343,7 @@ def render_dinput_source(shape_meta: ConvShapeMeta, vectorize=True):
         wmma_dim=_WMMA_DIM,
         block_tile_m=block_tile_m, block_tile_n=block_tile_n,
         vectorize=int(bool(vectorize)),
+        grad_scale=GRAD_SCALE,
         **vendor,
     )
 
@@ -372,6 +376,9 @@ def get_compiled_backward_dinput_kernel(shape_meta: ConvShapeMeta):
 
 def plan_dinput_launch(shape_meta: ConvShapeMeta, S: int):
     """conv_backward_dinput_wmma(dvalues_fp16, weight_fp16, dinputs).
+
+    dvalues_fp16 must already be scaled by GRAD_SCALE; dinputs come out in true
+    units.
 
     gridDim.z carries the residue class (h_in % sH, w_in % sW). The class has
     to be block-uniform because the B operand depends on it, and classes differ

@@ -1,15 +1,16 @@
 import warnings
 
 import aether.config as config
-from aether.custom_kernels.conv_kernel.common import _COMPILE_OPTIONS
+from aether.custom_kernels.conv_kernel.common import _COMPILE_OPTIONS, GRAD_SCALE
 
 # One launch casts both fp16 operands of the conv backward kernels. dvalues is
-# clipped to the fp16 range first; inputs is not, so dweight sees exactly the
-# fp16 inputs the forward pass multiplied.
+# scaled by GRAD_SCALE and clipped to the fp16 range first; inputs is neither, so
+# dweight sees exactly the fp16 inputs the forward pass multiplied.
 CONV_BACKWARD_CAST_SOURCE = r'''
 $fp16_include
 
 #define HALF_MAX 65504.0f
+#define GRAD_SCALE ${grad_scale}f
 
 extern "C" __global__ void conv_backward_cast_fp16(
     const float* __restrict__ dvalues,     // [n_dvalues] fp32, contiguous
@@ -21,7 +22,7 @@ extern "C" __global__ void conv_backward_cast_fp16(
 ) {
     const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n_dvalues) {
-        const float v = dvalues[i];
+        const float v = dvalues[i] * GRAD_SCALE;
         // Comparisons rather than fminf/fmaxf, which would turn NaN into
         // +-HALF_MAX: like xp.clip, NaN passes through and +-inf clamp.
         dvalues_fp16[i] = __float2half(v > HALF_MAX ? HALF_MAX : (v < -HALF_MAX ? -HALF_MAX : v));
@@ -40,7 +41,9 @@ def get_compiled_backward_cast_kernel(is_hip: bool):
         return _CONV_BACKWARD_CAST_CACHE[is_hip]
 
     fp16_include = "#include <hip/hip_fp16.h>" if is_hip else "#include <cuda_fp16.h>"
-    source = CONV_BACKWARD_CAST_SOURCE.replace("$fp16_include", fp16_include)
+    source = CONV_BACKWARD_CAST_SOURCE.replace("$fp16_include", fp16_include).replace(
+        "${grad_scale}", str(GRAD_SCALE)
+    )
 
     try:
         module = config.cp.RawModule(code=source, options=_COMPILE_OPTIONS)
@@ -55,7 +58,7 @@ def get_compiled_backward_cast_kernel(is_hip: bool):
 
 
 def cast_backward_operands_fp16(dvalues, inputs):
-    """(dvalues clipped to +-65504, inputs) as fp16, in one launch.
+    """(dvalues * GRAD_SCALE clipped to +-65504, inputs) as fp16, in one launch.
 
     Both must be contiguous fp32. Returns None when the kernel is unavailable,
     so the caller can fall back to astype/clip.

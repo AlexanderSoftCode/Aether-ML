@@ -40,7 +40,7 @@ class TestConvGpuParity(ConvLayerTestBase):
                 self.xp.testing.assert_allclose(gpu_out, fallback_out, rtol=1e-2, atol=1e-2)
 
     def _run_dweight_kernel_parity(self, S, spatial, in_channels, out_channels,
-                                   stride=None, padding=None, filter_size=None):
+                                   stride=None, padding=None, filter_size=None, dy_std=1.0):
         """Drive the fused dweight kernel once and check both of its outputs.
 
         conv_backward_dweight_wmma emits dweights AND dbiases from a single
@@ -71,9 +71,9 @@ class TestConvGpuParity(ConvLayerTestBase):
 
         fixed_input = self.xp.random.randn(S, H, W, in_channels).astype(self.xp.float32)
         meta = layer._get_shape_meta((H, W, in_channels))
-        dvalues = self.xp.random.randn(
+        dvalues = (self.xp.random.randn(
             S, meta.H_out, meta.W_out, out_channels
-        ).astype(self.xp.float32)
+        ) * dy_std).astype(self.xp.float32)
 
         layer._forward_fallback(fixed_input, training=True)
         layer._backward_fallback(dvalues)
@@ -119,7 +119,7 @@ class TestConvGpuParity(ConvLayerTestBase):
         )
 
     def _run_dinput_kernel_parity(self, S, spatial, in_channels, out_channels,
-                                  stride=None, padding=None, filter_size=None):
+                                  stride=None, padding=None, filter_size=None, dy_std=1.0):
         """Drive the gather dinput kernel and check it against the fallback."""
         if self.backend_name != 'cupy':
             self.skipTest("CuPy backend required for GPU kernel tests")
@@ -145,9 +145,9 @@ class TestConvGpuParity(ConvLayerTestBase):
 
         fixed_input = self.xp.random.randn(S, H, W, in_channels).astype(self.xp.float32)
         meta = layer._get_shape_meta((H, W, in_channels))
-        dvalues = self.xp.random.randn(
+        dvalues = (self.xp.random.randn(
             S, meta.H_out, meta.W_out, out_channels
-        ).astype(self.xp.float32)
+        ) * dy_std).astype(self.xp.float32)
 
         layer._forward_fallback(fixed_input, training=True)
         layer._backward_fallback(dvalues)
@@ -289,6 +289,37 @@ class TestConvGpuParity(ConvLayerTestBase):
             self._run_dinput_kernel_parity(S=2, spatial=(8, 8), in_channels=8, out_channels=20)
         if self.backend_name == 'cupy' and conv_kernel.get_is_conv_gpu_available():
             self.assertGreater(cast.call_count, 0)
+
+    def test_conv_gpu_backward_tiny_gradients_survive_fp16_cast(self):
+        """Regression: dY near 1e-8 is real at high resolution, and fp16 rounds it to 0.
+
+        Random dY of that size must match the fp32 fallback, and a constant one
+        must sum to a hand-computed bias gradient, with and without the cast kernel.
+        C_in = 3 and C_out = 6 take the scalar staging, 8 and 48 the vector one.
+        """
+        if self.backend_name != 'cupy':
+            self.skipTest("CuPy backend required for GPU kernel tests")
+        from aether.custom_kernels import conv_kernel
+        if not conv_kernel.get_is_conv_gpu_available():
+            self.skipTest("Matrix-core GPU kernels not available on this device")
+
+        S, H, W = 4, 16, 16
+        real_cast = conv_kernel.cast_backward_operands_fp16
+        for name, cast in (("cast kernel", real_cast), ("astype fallback", lambda *_: None)):
+            for C_in, C_out in ((3, 6), (8, 48)):
+                with self.subTest(path=name, C_in=C_in, C_out=C_out), \
+                     mock.patch.object(conv_kernel, "cast_backward_operands_fp16", cast):
+                    self._run_dweight_kernel_parity(S, (H, W), C_in, C_out, dy_std=1e-8)
+                    self._run_dinput_kernel_parity(S, (H, W), C_in, C_out, dy_std=1e-8)
+
+                    layer = self._make_same_layer((H, W), (3, 3), (1, 1),
+                                                  in_channels=C_in, out_channels=C_out)
+                    x = self.xp.random.randn(S, H, W, C_in).astype(self.xp.float32)
+                    layer._forward_gpu(x, training=True)
+                    layer._backward_gpu(self.xp.full((S, H, W, C_out), 1e-8, dtype=self.xp.float32))
+                    self._assert_gemm_close(
+                        layer.dbiases, self.xp.full((C_out,), S * H * W * 1e-8), "constant dY dbiases"
+                    )
 
     def test_conv_gpu_partial_second_column_tile_parity(self):
         """84 = 64 + 16 + 4 channels on the GEMM N axis (C_out, or C_in for dinput).
