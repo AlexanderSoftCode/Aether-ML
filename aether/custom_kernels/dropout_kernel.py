@@ -1,10 +1,16 @@
+import warnings
+from string import Template
+
+import numpy as np
+
 import aether.config as config
 
 _PHILOX_PREAMBLE = r'''
-__device__ __forceinline__ float philox_uniform(
+__device__ __forceinline__ void philox4x32_10(
         unsigned long long philox_seed,
         unsigned long long philox_offset,
-        long long idx) {
+        long long idx,
+        unsigned int* words) {
 
     unsigned int c0 = (unsigned int)(philox_offset & 0xffffffffULL);
     unsigned int c1 = (unsigned int)(philox_offset >> 32);
@@ -32,87 +38,129 @@ __device__ __forceinline__ float philox_uniform(
         k0 += 0x9E3779B9u;
         k1 += 0xBB67AE85u;
     }
-    return (c0 >> 8) * (1.0f / 16777216.0f);
+    words[0] = c0; words[1] = c1; words[2] = c2; words[3] = c3;
 }
 '''
 
-_philox_dropout_forward = config.build_kernel(
+# Each thread owns the 8 elements starting at thread_index * 8 and splits one Philox
+# call into their 16-bit draws, low half first. threshold is compared as 32 bits so
+# 65536 (rate 0) keeps every draw. Forward and backward launch this same source, and
+# the draws never see the data, so both directions drop the same elements in any dtype.
+_DROPOUT_TEMPLATE = Template(r'''
+$include
+$philox
+
+extern "C" __global__
+void $kernel_name(
+    const $data_t* __restrict__ src,
+    $data_t* __restrict__ dst,
+    const unsigned long long philox_seed,
+    const unsigned long long philox_offset,
+    const unsigned int threshold,
+    const $work_t inv_keep,
+    const long long size
+) {
+    const long long thread_index = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    const long long first = thread_index * 8;
+    if (first >= size) return;
+
+    unsigned int words[4];
+    philox4x32_10(philox_seed, philox_offset, thread_index, words);
+
+    for (int j = 0; j < 8 && first + j < size; ++j) {
+        const unsigned int draw = (words[j >> 1] >> ((j & 1) * 16)) & 0xffffu;
+        const long long i = first + j;
+        dst[i] = $store(draw < threshold ? $load(src[i]) * inv_keep : ($work_t)0);
+    }
+}
+''')
+
+_INCLUDES = {
+    "hip": "#include <hip/hip_runtime.h>\n#include <hip/hip_fp16.h>",
+    "cuda": "#include <cuda_fp16.h>",
+}
+
+_DTYPES = {
+    np.dtype(np.float16): dict(data_t='half', work_t='float', load='__half2float', store='__float2half'),
+    np.dtype(np.float32): dict(data_t='float', work_t='float', load='', store=''),
+    np.dtype(np.float64): dict(data_t='double', work_t='double', load='', store=''),
+}
+
+# A dropped channel is exactly 0: multiplying alone would turn NaN or inf into NaN.
+_channel_mask_apply = config.build_kernel(
     lambda: config.cp.ElementwiseKernel(
-        'T x, uint64 philox_seed, uint64 philox_offset, float64 keep_prob',
+        'T x, U mask',
         'T y',
-        '''
-        float u = philox_uniform(philox_seed, philox_offset, i);
-        y = (u < keep_prob) ? (T)(x / keep_prob) : (T)0;
-        ''',
-        '_philox_dropout_forward',
-        preamble=_PHILOX_PREAMBLE,
+        'y = mask != 0 ? (T)(x * mask) : (T)0',
+        'channel_mask_apply_kernel',
     ),
-    name='_philox_dropout_forward'
+    name='_channel_mask_apply',
 )
 
-_philox_dropout_backward = config.build_kernel(
-    lambda: config.cp.ElementwiseKernel(
-        'T dvalues, uint64 philox_seed, uint64 philox_offset, float64 keep_prob',
-        'T dinputs',
-        '''
-        float u = philox_uniform(philox_seed, philox_offset, i);
-        dinputs = (u < keep_prob) ? (T)(dvalues / keep_prob) : (T)0;
-        ''',
-        '_philox_dropout_backward',
-        preamble=_PHILOX_PREAMBLE,
-    ),
-    name='_philox_dropout_backward'
-)
+_dropout_kernel_cache = {}
 
-_philox_spatial_dropout_forward = config.build_kernel(lambda: config.cp.ElementwiseKernel(
-    'T x, uint64 philox_seed, uint64 philox_offset, float64 keep_prob, int64 C, int64 HWC',
-    'T y',
-    '''
-    // Collapse the per-element index into a per-(sample, channel) index.
-    long long c = (i / HWC) * C + i % C;
-    float u = philox_uniform(philox_seed, philox_offset, c);
-    y = (u < keep_prob) ? (T)(x / keep_prob) : (T)0;
-    ''',
-    '_philox_spatial_dropout_forward',
-    preamble=_PHILOX_PREAMBLE,
-    ),
-    name = '_philox_spatial_dropout_forward'
-)
 
-_philox_spatial_dropout_backward = config.build_kernel(lambda: config.cp.ElementwiseKernel(
-    'T dvalues, uint64 philox_seed, uint64 philox_offset, float64 keep_prob, int64 C, int64 HWC',
-    'T dinputs',
-    '''
-    // Compute the same channel mask used in forward pass, as the output is deterministic
-    // passing in our forward inputs results in the same same u value.
-    long long c = (i / HWC) * C + i % C;
-    float u = philox_uniform(philox_seed, philox_offset, c);
-    dinputs = (u < keep_prob) ? (T)(dvalues / keep_prob) : (T)0;
-    ''',
-    '_philox_spatial_dropout_backward',
-    preamble=_PHILOX_PREAMBLE,
-    ),
-    name = '_philox_spatial_dropout_backward'
-)
+def _get_compiled_kernel(variant: str, dtype):
+    """Cached, compiled kernel for one vendor variant and data dtype.
 
-# Helper functions for layer Dropout
+    A failed compile is cached as None so a broken build doesn't re-attempt (and
+    re-warn) on every launch.
+    """
+    key = (variant, dtype)
+    if key in _dropout_kernel_cache:
+        return _dropout_kernel_cache[key]
+
+    if dtype not in _DTYPES:
+        raise TypeError(f"[aether] GPU dropout reads float16, float32 or float64, not {dtype}.")
+
+    kernel_name = f"philox_dropout_{dtype.name}_{variant}_kernel"
+    source = _DROPOUT_TEMPLATE.substitute(
+        include=_INCLUDES[variant],
+        philox=_PHILOX_PREAMBLE,
+        kernel_name=kernel_name,
+        **_DTYPES[dtype],
+    )
+
+    try:
+        kernel = config.cp.RawModule(code=source).get_function(kernel_name)
+    except (config.cp.cuda.compiler.CompileException, config.cp.cuda.driver.CUDADriverError) as e:
+        warnings.warn(f"[aether] dropout_kernel: {kernel_name} compile failed: {e}")
+        kernel = None
+
+    _dropout_kernel_cache[key] = kernel
+    return kernel
+
+
 def is_gpu_dropout_available() -> bool:
-    """Checks if CuPy hardware support and kernels are loaded."""
-    return _philox_dropout_forward is not None and _philox_dropout_backward is not None
+    """Checks if CuPy hardware support is loaded. Kernels compile at first launch."""
+    return config.HAS_CUPY
 
-def philox_dropout_forward(inputs, seed: int, offset: int, keep_rate: float):
-    return _philox_dropout_forward(inputs, seed, offset, float(keep_rate)) # type: ignore
 
-def philox_dropout_backward(dvalues, seed: int, offset: int, keep_rate: float):
-    return _philox_dropout_backward(dvalues, seed, offset, float(keep_rate)) # type: ignore
+def apply_channel_mask(x, mask):
+    return _channel_mask_apply(x, mask)
 
-# Helper functions for layer SpatialDropout
-def is_gpu_spatial_dropout_available() -> bool:
-    """Checks if CuPy hardware support and kernels are loaded."""
-    return _philox_spatial_dropout_forward is not None and _philox_spatial_dropout_backward is not None
 
-def philox_spatial_dropout_forward(inputs, seed: int, offset: int, keep_rate: float, C: int, HWC: int):
-    return _philox_spatial_dropout_forward(inputs, seed, offset, float(keep_rate), C, HWC) # type: ignore
+def philox_dropout(src, seed: int, offset: int, threshold: int, inv_keep: float):
+    """Returns src with each element kept and scaled by inv_keep, or zeroed.
 
-def philox_spatial_dropout_backward(dvalues, seed: int, offset: int, keep_rate: float, C: int, HWC: int):
-    return _philox_spatial_dropout_backward(dvalues, seed, offset, keep_rate, C, HWC) # type: ignore
+    The result has src's shape and dtype. Returns None when the kernel for that
+    dtype failed to compile, so the caller can fall back.
+    """
+    variant, threads = config.resolve_gpu_launch_geometry()
+    kernel = _get_compiled_kernel(variant, np.dtype(src.dtype))
+    if kernel is None:
+        return None
+
+    xp = config.cp
+    src = xp.ascontiguousarray(src)
+    dst = xp.empty(src.shape, dtype=src.dtype)
+    size = src.size
+    philox_calls = -(-size // 8)
+    blocks = -(-philox_calls // threads)
+    scale = np.float64(inv_keep) if src.dtype == xp.float64 else np.float32(inv_keep)
+
+    kernel(
+        (blocks,), (threads,),
+        (src, dst, np.uint64(seed), np.uint64(offset), np.uint32(threshold), scale, np.int64(size)),
+    )
+    return dst
