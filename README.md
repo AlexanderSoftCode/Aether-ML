@@ -162,10 +162,10 @@ One exception is deliberate. The `training` flag stays a plain runtime boolean, 
 
 ## Benchmarks
 
-All figures below come from the same CNN, the same CIFAR-10 batches, the same seed, and the same hardware (AMD RX 9070 XT, Intel Core Ultra 265K). Only the dispatch path differs.
+All figures below come from the same CNN, the same seed, the same fp16 precision policy, and the same hardware (AMD RX 9070 XT, Intel Core Ultra 265K). The dispatch path differs, and with it Conv2d's precision: only the fused path can run Conv2d in fp16, so the other two compute it in fp32. The scripts and saved results are in [`benchmarks/`](benchmarks/README.md).
 
 ### Convergence
-Four paths are tested; NumPy on CPU, legacy pre-refactor GPU implementation, vectorized CuPy without custom kernels, and the fused kernel path.  
+Three paths are tested; NumPy on CPU, vectorized CuPy without custom kernels, and the fused kernel path.  
   
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/benchmark_convergence-dark.png">
@@ -175,7 +175,7 @@ Four paths are tested; NumPy on CPU, legacy pre-refactor GPU implementation, vec
 
 ### Throughput
 
-Per training step: **3.17 ms** on the fused kernel path vs **52.6 ms** on vectorized CuPy on the same GPU, with **326 ms** for NumPy on CPU. With the GPU paths, the kernel work shows a **17x speedup against identical hardware running array operations**.
+Per training step: **4.85 ms** on the fused kernel path vs **202 ms** on vectorized CuPy on the same GPU, with **1,865 ms** for NumPy on CPU. With the GPU paths, the kernel work shows a **42x speedup against identical hardware running array operations**.
   
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/benchmark_throughput-dark.png">
@@ -185,15 +185,13 @@ Per training step: **3.17 ms** on the fused kernel path vs **52.6 ms** on vector
 
 ### Transient VRAM 
 
-Transient VRAM footprint over two training steps. Unfused CuPy dispatches allocate independent temporary buffers in VRAM for intermediate steps, resulting in transient spikes up to **180 MiB**. Custom fused kernels eliminate the need to create temporary buffers by executing multiple actions in the same kernel within registers and shared memory, reducing peak transient VRAM by **5.6×** (32.0 MiB peak).  
+Transient VRAM footprint over two training steps. Unfused CuPy dispatches allocate independent temporary buffers in VRAM for intermediate steps, resulting in transient spikes up to **420 MiB**. Custom fused kernels eliminate the need to create temporary buffers by executing multiple actions in the same kernel within registers and shared memory, reducing peak transient VRAM by **5.3×** (80.0 MiB peak).  
   
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/benchmark_vram-dark.png">
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/benchmark_vram.png">
   <img alt="Transient VRAM usage" src="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/benchmark_vram.png">
 </picture>
-
-**On the legacy series.** "Legacy CuPy" contains a `float64` type promotion bug that was found during the rewrite. GPUs often have very few or no FP64 ALUs, which explains the slowdown. The pathway is still included as an honest before-and-after, and not as a competitive baseline.
 
 ---
 
