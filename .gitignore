@@ -11,3 +11,4 @@ build/
 .vscode/
 .venv/
 benchmarks/results/
+/.worktrees/
