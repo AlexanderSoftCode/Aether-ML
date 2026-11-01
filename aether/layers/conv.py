@@ -44,6 +44,11 @@ class Conv2d(Layer):
     Unless a precision is set, on a GPU the layer uses fp16 WMMA kernels
     (float32 accumulate). WMMA can't take >fp16 operands, so an explicit
     ``float32`` request uses the slower fallback vectorized path instead.
+
+    On that path backward scales incoming gradients by 2^10 before the fp16 cast
+    and undoes it on what it outputs, so values far below fp16's smallest step
+    survive. Gradients stay in true units outside the layer, but each element of
+    the incoming gradient is silently clipped at about +-64.
     """
 
     def __init__(self, in_channels, out_channels = 1, filter_size = (3, 3), stride = (1, 1), padding = "same", l1=(), l2=()):
@@ -310,7 +315,7 @@ class Conv2d(Layer):
         if cast is not None:
             dvalues_fp16, inputs_fp16 = cast
         else:
-            dvalues_bounded = xp.clip(dvalues_fp32, -65504.0, 65504.0)
+            dvalues_bounded = xp.clip(dvalues_fp32 * conv_kernel.GRAD_SCALE, -65504.0, 65504.0)
             dvalues_fp16 = dvalues_bounded.astype(xp.float16, copy=False)
             inputs_fp16 = inputs_fp32.astype(xp.float16, copy=False)
 

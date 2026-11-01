@@ -12,6 +12,7 @@ from aether.custom_kernels.conv_kernel.cast import (
     get_compiled_backward_cast_kernel,
 )
 from aether.custom_kernels.conv_kernel.common import (
+    GRAD_SCALE,
     ConvLaunchPlan,
     ConvShapeMeta,
     choose_block_tile_n,
@@ -37,6 +38,7 @@ from aether.custom_kernels.conv_kernel.forward import (
 )
 
 __all__ = [
+    "GRAD_SCALE",
     "_CONV_BACKWARD_CAST_CACHE",
     "_CONV_BACKWARD_DINPUT_CACHE",
     "_CONV_BACKWARD_DWEIGHT_CACHE",
