@@ -36,8 +36,10 @@ import time
 from pathlib import Path
 
 import cupy as cp
+import numpy as np
 
 import aether as ae
+import aether.config as config
 
 TRAIN_DIR = Path("data") / "cifar-10" / "cifar-10_train.npz"
 
@@ -48,10 +50,22 @@ BASELINE_STEPS = 128
 BREAKDOWN_STEPS = 100
 
 
-def build_model(X_train):
+def load_train():
+    """CIFAR-10 training images and labels, as host arrays."""
+    if not TRAIN_DIR.exists():
+        sys.exit(
+            f"[aether] {TRAIN_DIR} not found. Run from the repo root after creating it "
+            "with examples/cifar10/cifar-setup.ipynb."
+        )
+    with np.load(TRAIN_DIR, allow_pickle=False) as data:
+        return data["X_train"], data["y_train"]
+
+
+def build_model(X_train, device="cupy"):
     """Same model, pipeline and precision as examples/cifar10/v1_cifar10.py."""
+    config.set_backend(device)
     feature_pipeline = ae.Compose([
-        ae.ToTensor(dtype='float32', target_device="cupy"),
+        ae.ToTensor(dtype='float32', target_device=device),
         ae.Rescale(factor=1.0 / 255.0),
         ae.StandardScaler()
     ])
@@ -93,7 +107,7 @@ def build_model(X_train):
         preprocessor=feature_pipeline
     )
 
-    model.to('cupy')
+    model.to(device)
     model.set_precision(compute_dtype=COMPUTE_DTYPE)
     model.finalize(input_shape=X_train.shape[1:])
     feature_pipeline.fit(X_train)
@@ -218,15 +232,34 @@ def spread(samples):
 
 
 def git_state():
-    """(commit, dirty) of the checkout, or (None, None) outside git."""
+    """(commit, dirty) of the checkout aether was imported from, or (None, None)
+    outside git, so a run against a worktree of an older tag records that tag."""
+    source = Path(ae.__file__).parent
     try:
         commit = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
-                                text=True, check=True).stdout.strip()
+                                text=True, check=True, cwd=source).stdout.strip()
         status = subprocess.run(["git", "status", "--porcelain"], capture_output=True,
-                                text=True, check=True).stdout
+                                text=True, check=True, cwd=source).stdout
     except (OSError, subprocess.CalledProcessError):
         return None, None
     return commit, bool(status.strip())
+
+
+def run_meta():
+    """What a result file needs to say about where it was measured."""
+    commit, dirty = git_state()
+    return {
+        "commit": commit,
+        "dirty": dirty,
+        "date": datetime.datetime.now().isoformat(timespec="seconds"),
+        "gpu": cp.cuda.runtime.getDeviceProperties(0)["name"].decode(),
+        "cupy": cp.__version__,
+        "python": platform.python_version(),
+        "batch_size": BATCH_SIZE,
+        "compute_dtype": COMPUTE_DTYPE,
+        "warmup_steps": WARMUP_STEPS,
+        "baseline_steps": BASELINE_STEPS,
+    }
 
 
 def bound_paths(model):
@@ -249,14 +282,7 @@ def main():
     if args.repeats < 1:
         parser.error("--repeats must be at least 1")
 
-    if not TRAIN_DIR.exists():
-        sys.exit(
-            f"[aether] {TRAIN_DIR} not found. Run from the repo root after creating it "
-            "with examples/cifar10/cifar-setup.ipynb."
-        )
-    with cp.load(TRAIN_DIR, allow_pickle=False) as data:
-        X_train = data["X_train"]
-        y_train = data["y_train"]
+    X_train, y_train = (cp.asarray(array) for array in load_train())
 
     model, feature_pipeline = build_model(X_train)
     transforms = feature_pipeline.transforms
@@ -271,19 +297,9 @@ def main():
             timed_train(model, X_train, y_train, BASELINE_STEPS) * 1e3 / BASELINE_STEPS)
         breakdown_runs.append(breakdown(model, transforms, X_train, y_train))
 
-    commit, dirty = git_state()
     result = {
         "meta": {
-            "commit": commit,
-            "dirty": dirty,
-            "date": datetime.datetime.now().isoformat(timespec="seconds"),
-            "gpu": cp.cuda.runtime.getDeviceProperties(0)["name"].decode(),
-            "cupy": cp.__version__,
-            "python": platform.python_version(),
-            "batch_size": BATCH_SIZE,
-            "compute_dtype": COMPUTE_DTYPE,
-            "warmup_steps": WARMUP_STEPS,
-            "baseline_steps": BASELINE_STEPS,
+            **run_meta(),
             "breakdown_steps": BREAKDOWN_STEPS,
             "repeats": args.repeats,
             "warmup_s": warmup_s,

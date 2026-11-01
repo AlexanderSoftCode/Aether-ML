@@ -1,0 +1,689 @@
+{
+  "meta": {
+    "commit": "089667c28f9d396f32794c64ae9a594ad7bf7c6d",
+    "dirty": false,
+    "date": "2026-11-01T01:56:33",
+    "gpu": "NVIDIA GeForce RTX 3050 6GB Laptop GPU",
+    "cupy": "14.2.0",
+    "python": "3.14.10",
+    "batch_size": 256,
+    "compute_dtype": "float16",
+    "warmup_steps": 20,
+    "baseline_steps": 128,
+    "breakdown_steps": 100,
+    "repeats": 3,
+    "warmup_s": 1.6355306000000382
+  },
+  "paths": {
+    "00 Conv2d": "_forward_gpu compute=float16",
+    "01 BatchNorm": "_forward_gpu",
+    "02 ReLU": "_forward_fallback",
+    "03 Conv2d": "_forward_gpu compute=float16",
+    "04 BatchNorm": "_forward_gpu",
+    "05 ReLU": "_forward_fallback",
+    "06 MaxPool2d": "_forward_gpu",
+    "07 SpatialDropout": "_forward_gpu",
+    "08 Conv2d": "_forward_gpu compute=float16",
+    "09 BatchNorm": "_forward_gpu",
+    "10 ReLU": "_forward_fallback",
+    "11 Conv2d": "_forward_gpu compute=float16",
+    "12 BatchNorm": "_forward_gpu",
+    "13 ReLU": "_forward_fallback",
+    "14 MaxPool2d": "_forward_gpu",
+    "15 SpatialDropout": "_forward_gpu",
+    "16 Conv2d": "_forward_gpu compute=float16",
+    "17 BatchNorm": "_forward_gpu",
+    "18 ReLU": "_forward_fallback",
+    "19 MaxPool2d": "_forward_gpu",
+    "20 SpatialDropout": "_forward_gpu",
+    "21 GlobalAvgPool": "_forward_gpu",
+    "22 Dense": "forward"
+  },
+  "baseline_ms": {
+    "median": 21.712432031250728,
+    "min": 21.670398437500182,
+    "max": 21.753719531250937
+  },
+  "gpu_total_ms": {
+    "median": 22.633761531174784,
+    "min": 22.510250534674135,
+    "max": 22.636088920362067
+  },
+  "host_total_ms": {
+    "median": 6.102232323235402,
+    "min": 5.9557383838481,
+    "max": 6.998035353540723
+  },
+  "rows": [
+    {
+      "name": "preprocess  ToTensor",
+      "stage": "preprocess",
+      "gpu_ms": {
+        "median": 0.1947823835141731,
+        "min": 0.1769810106718179,
+        "max": 0.1982012117149854
+      },
+      "host_ms": {
+        "median": 0.17068989899084358,
+        "min": 0.1555535353565225,
+        "max": 0.1746030302846787
+      }
+    },
+    {
+      "name": "preprocess  Rescale",
+      "stage": "preprocess",
+      "gpu_ms": {
+        "median": 0.11805996012808097,
+        "min": 0.1122763640049732,
+        "max": 0.12491636384617198
+      },
+      "host_ms": {
+        "median": 0.08379696970508241,
+        "min": 0.0801353535509884,
+        "max": 0.0893333333236785
+      }
+    },
+    {
+      "name": "preprocess  StandardScaler",
+      "stage": "preprocess",
+      "gpu_ms": {
+        "median": 0.14316347595116105,
+        "min": 0.13149414264192485,
+        "max": 0.1446322424694745
+      },
+      "host_ms": {
+        "median": 0.12222121211958768,
+        "min": 0.10761515150446976,
+        "max": 0.12721414140002588
+      }
+    },
+    {
+      "name": "forward  00 Conv2d",
+      "stage": "forward",
+      "gpu_ms": {
+        "median": 0.507004120735207,
+        "min": 0.4924499410571474,
+        "max": 0.5219193534417585
+      },
+      "host_ms": {
+        "median": 0.21478080808641736,
+        "min": 0.20426565655532503,
+        "max": 0.23593333334605576
+      }
+    },
+    {
+      "name": "forward  01 BatchNorm",
+      "stage": "forward",
+      "gpu_ms": {
+        "median": 0.825106103612919,
+        "min": 0.8249302675025632,
+        "max": 0.8258508347501659
+      },
+      "host_ms": {
+        "median": 0.14837676768237165,
+        "min": 0.14721111110610755,
+        "max": 0.17004646464685189
+      }
+    },
+    {
+      "name": "forward  03 Conv2d",
+      "stage": "forward",
+      "gpu_ms": {
+        "median": 1.1847783435474744,
+        "min": 1.180227229089448,
+        "max": 1.187829659442709
+      },
+      "host_ms": {
+        "median": 0.11979898988901175,
+        "min": 0.11830909090459693,
+        "max": 0.14914949496176064
+      }
+    },
+    {
+      "name": "forward  04 BatchNorm",
+      "stage": "forward",
+      "gpu_ms": {
+        "median": 0.8245165299887609,
+        "min": 0.8244751565384142,
+        "max": 0.8246406515439352
+      },
+      "host_ms": {
+        "median": 0.10434141412671041,
+        "min": 0.09767575758557698,
+        "max": 0.11570909091828108
+      }
+    },
+    {
+      "name": "forward  06 MaxPool2d",
+      "stage": "forward",
+      "gpu_ms": {
+        "median": 0.4197158789393878,
+        "min": 0.4194883240593804,
+        "max": 0.41987103073283877
+      },
+      "host_ms": {
+        "median": 0.07506565655125767,
+        "min": 0.07394747476472262,
+        "max": 0.08289595959670099
+      }
+    },
+    {
+      "name": "forward  07 SpatialDropout",
+      "stage": "forward",
+      "gpu_ms": {
+        "median": 0.16185405970823885,
+        "min": 0.1615954726332366,
+        "max": 0.16196783714824253
+      },
+      "host_ms": {
+        "median": 0.10757979797781812,
+        "min": 0.1044929292950683,
+        "max": 0.11521515149998052
+      }
+    },
+    {
+      "name": "forward  08 Conv2d",
+      "stage": "forward",
+      "gpu_ms": {
+        "median": 0.5091659014273171,
+        "min": 0.5059284047044889,
+        "max": 0.509455516783878
+      },
+      "host_ms": {
+        "median": 0.10962929293396662,
+        "min": 0.10426464646024206,
+        "max": 0.11930404040105365
+      }
+    },
+    {
+      "name": "forward  09 BatchNorm",
+      "stage": "forward",
+      "gpu_ms": {
+        "median": 0.42117430164356423,
+        "min": 0.42113292488184845,
+        "max": 0.42149494633530127
+      },
+      "host_ms": {
+        "median": 0.09383232323864032,
+        "min": 0.09198888887976404,
+        "max": 0.11399898987908061
+      }
+    },
+    {
+      "name": "forward  11 Conv2d",
+      "stage": "forward",
+      "gpu_ms": {
+        "median": 0.9305677576498552,
+        "min": 0.9221895722427753,
+        "max": 0.9330812102616436
+      },
+      "host_ms": {
+        "median": 0.08962525251061176,
+        "min": 0.08754343434932275,
+        "max": 0.10928686868861735
+      }
+    },
+    {
+      "name": "forward  12 BatchNorm",
+      "stage": "forward",
+      "gpu_ms": {
+        "median": 0.42113292548391557,
+        "min": 0.42088468478183555,
+        "max": 0.421350137151853
+      },
+      "host_ms": {
+        "median": 0.0842717171682961,
+        "min": 0.08312727271858779,
+        "max": 0.10403939395611374
+      }
+    },
+    {
+      "name": "forward  14 MaxPool2d",
+      "stage": "forward",
+      "gpu_ms": {
+        "median": 0.2151537797968797,
+        "min": 0.21508137595773946,
+        "max": 0.21528824486515738
+      },
+      "host_ms": {
+        "median": 0.057403030319215356,
+        "min": 0.05166767677927955,
+        "max": 0.05820707071341696
+      }
+    },
+    {
+      "name": "forward  15 SpatialDropout",
+      "stage": "forward",
+      "gpu_ms": {
+        "median": 0.09047402102838863,
+        "min": 0.09003959663889625,
+        "max": 0.09049470790407875
+      },
+      "host_ms": {
+        "median": 0.07976464646410684,
+        "min": 0.0780828282733288,
+        "max": 0.09178484850219154
+      }
+    },
+    {
+      "name": "forward  16 Conv2d",
+      "stage": "forward",
+      "gpu_ms": {
+        "median": 0.4345276759128378,
+        "min": 0.4305868287279148,
+        "max": 0.43584129515320363
+      },
+      "host_ms": {
+        "median": 0.0903393939469507,
+        "min": 0.08958686868311935,
+        "max": 0.11052323232048145
+      }
+    },
+    {
+      "name": "forward  17 BatchNorm",
+      "stage": "forward",
+      "gpu_ms": {
+        "median": 0.21930149393250245,
+        "min": 0.219280807959913,
+        "max": 0.2193428682859498
+      },
+      "host_ms": {
+        "median": 0.09031717170939667,
+        "min": 0.08588585858823801,
+        "max": 0.10345454546206218
+      }
+    },
+    {
+      "name": "forward  19 MaxPool2d",
+      "stage": "forward",
+      "gpu_ms": {
+        "median": 0.11707733518848515,
+        "min": 0.116684284550373,
+        "max": 0.11765656718099961
+      },
+      "host_ms": {
+        "median": 0.045989898982879085,
+        "min": 0.042743434349434055,
+        "max": 0.05077777778163668
+      }
+    },
+    {
+      "name": "forward  20 SpatialDropout",
+      "stage": "forward",
+      "gpu_ms": {
+        "median": 0.05613381855867126,
+        "min": 0.05603038418022069,
+        "max": 0.056154505434361374
+      },
+      "host_ms": {
+        "median": 0.0738717171702085,
+        "min": 0.07100404040368566,
+        "max": 0.08716060605218794
+      }
+    },
+    {
+      "name": "forward  21 GlobalAvgPool",
+      "stage": "forward",
+      "gpu_ms": {
+        "median": 0.026189576138300124,
+        "min": 0.02462771755050529,
+        "max": 0.026644687158892854
+      },
+      "host_ms": {
+        "median": 0.023995959596467942,
+        "min": 0.022111111106961758,
+        "max": 0.02699999999728761
+      }
+    },
+    {
+      "name": "forward  22 Dense",
+      "stage": "forward",
+      "gpu_ms": {
+        "median": 0.026448161689319995,
+        "min": 0.02434844437121141,
+        "max": 0.027523878679582565
+      },
+      "host_ms": {
+        "median": 0.24233636363211614,
+        "min": 0.23850000001163948,
+        "max": 0.26646262626579276
+      }
+    },
+    {
+      "name": "loss.calculate",
+      "stage": "loss.calculate",
+      "gpu_ms": {
+        "median": 0.20997559617866168,
+        "min": 0.20542125253364293,
+        "max": 0.2181126470818664
+      },
+      "host_ms": {
+        "median": 0.6400909090859727,
+        "min": 0.6076484848443839,
+        "max": 0.7071242424132439
+      }
+    },
+    {
+      "name": "loss.regularization_loss",
+      "stage": "loss.regularization_loss",
+      "gpu_ms": {
+        "median": 0.046473050640538485,
+        "min": 0.04279919179401012,
+        "max": 0.047892040582467814
+      },
+      "host_ms": {
+        "median": 0.10134949494762752,
+        "min": 0.09805555554053033,
+        "max": 0.1278555555518783
+      }
+    },
+    {
+      "name": "accuracy.calculate",
+      "stage": "accuracy.calculate",
+      "gpu_ms": {
+        "median": 0.07273697002668573,
+        "min": 0.0707484446842261,
+        "max": 0.07661834377983603
+      },
+      "host_ms": {
+        "median": 0.2737737373821011,
+        "min": 0.25985959596347136,
+        "max": 0.3001565656549329
+      }
+    },
+    {
+      "name": "loss.backward",
+      "stage": "loss.backward",
+      "gpu_ms": {
+        "median": 0.031988040609943744,
+        "min": 0.02971959597609862,
+        "max": 0.03457486873135121
+      },
+      "host_ms": {
+        "median": 0.11437272727369308,
+        "min": 0.11035656565021634,
+        "max": 0.13505454546358317
+      }
+    },
+    {
+      "name": "backward 22 Dense",
+      "stage": "backward",
+      "gpu_ms": {
+        "median": 0.06669834361533926,
+        "min": 0.06054981826155475,
+        "max": 0.07714133359717601
+      },
+      "host_ms": {
+        "median": 0.29683838383651606,
+        "min": 0.26638383840259167,
+        "max": 0.3383888888998222
+      }
+    },
+    {
+      "name": "backward 21 GlobalAvgPool",
+      "stage": "backward",
+      "gpu_ms": {
+        "median": 0.029940363245479988,
+        "min": 0.02761406022490877,
+        "max": 0.030093898865008593
+      },
+      "host_ms": {
+        "median": 0.04033737373176355,
+        "min": 0.0354525252601668,
+        "max": 0.043252525248971496
+      }
+    },
+    {
+      "name": "backward 20 SpatialDropout",
+      "stage": "backward",
+      "gpu_ms": {
+        "median": 0.04458957500379495,
+        "min": 0.043990625538910276,
+        "max": 0.046549655948624466
+      },
+      "host_ms": {
+        "median": 0.0329080808183569,
+        "min": 0.03242626263327662,
+        "max": 0.04053535353751163
+      }
+    },
+    {
+      "name": "backward 19 MaxPool2d",
+      "stage": "backward",
+      "gpu_ms": {
+        "median": 0.22113227979703384,
+        "min": 0.22060444123215145,
+        "max": 0.22215628021895284
+      },
+      "host_ms": {
+        "median": 0.07459494950217968,
+        "min": 0.07139393939512663,
+        "max": 0.08824242425160062
+      }
+    },
+    {
+      "name": "backward 17 BatchNorm",
+      "stage": "backward",
+      "gpu_ms": {
+        "median": 0.3505389934236353,
+        "min": 0.3505389919184675,
+        "max": 0.35081826526709275
+      },
+      "host_ms": {
+        "median": 0.13612828281405412,
+        "min": 0.13537171717972443,
+        "max": 0.151479797984917
+      }
+    },
+    {
+      "name": "backward 16 Conv2d",
+      "stage": "backward",
+      "gpu_ms": {
+        "median": 0.9800714362751354,
+        "min": 0.9714346678570064,
+        "max": 0.9839605670986753
+      },
+      "host_ms": {
+        "median": 0.13768282830061812,
+        "min": 0.13106969698477622,
+        "max": 0.1547090908967551
+      }
+    },
+    {
+      "name": "backward 15 SpatialDropout",
+      "stage": "backward",
+      "gpu_ms": {
+        "median": 0.07724476876583966,
+        "min": 0.07718270776247738,
+        "max": 0.07733785902911966
+      },
+      "host_ms": {
+        "median": 0.039056565638571614,
+        "min": 0.028635353550675466,
+        "max": 0.03962222223036048
+      }
+    },
+    {
+      "name": "backward 14 MaxPool2d",
+      "stage": "backward",
+      "gpu_ms": {
+        "median": 0.42642876535955104,
+        "min": 0.423294705272925,
+        "max": 0.4294076745558267
+      },
+      "host_ms": {
+        "median": 0.05509797980000322,
+        "min": 0.053436363631672895,
+        "max": 0.06401515149649861
+      }
+    },
+    {
+      "name": "backward 12 BatchNorm",
+      "stage": "backward",
+      "gpu_ms": {
+        "median": 0.6837320442151542,
+        "min": 0.6834010542041123,
+        "max": 0.6837630729482631
+      },
+      "host_ms": {
+        "median": 0.10246767675942631,
+        "min": 0.0963313131264978,
+        "max": 0.127233333329849
+      }
+    },
+    {
+      "name": "backward 11 Conv2d",
+      "stage": "backward",
+      "gpu_ms": {
+        "median": 2.0694936622272837,
+        "min": 2.0490446861344154,
+        "max": 2.077075379063385
+      },
+      "host_ms": {
+        "median": 0.1069989899116825,
+        "min": 0.10162323229965893,
+        "max": 0.12427777778611926
+      }
+    },
+    {
+      "name": "backward 09 BatchNorm",
+      "stage": "backward",
+      "gpu_ms": {
+        "median": 0.6815702644261447,
+        "min": 0.6815702626199434,
+        "max": 0.6818081646254568
+      },
+      "host_ms": {
+        "median": 0.08994646465696567,
+        "min": 0.08812828282959409,
+        "max": 0.10297575756633917
+      }
+    },
+    {
+      "name": "backward 08 Conv2d",
+      "stage": "backward",
+      "gpu_ms": {
+        "median": 1.1109365670367926,
+        "min": 1.1023618572890157,
+        "max": 1.1144636821265173
+      },
+      "host_ms": {
+        "median": 0.09324343433734318,
+        "min": 0.09187474746235091,
+        "max": 0.11995050505966635
+      }
+    },
+    {
+      "name": "backward 07 SpatialDropout",
+      "stage": "backward",
+      "gpu_ms": {
+        "median": 0.14886270975223695,
+        "min": 0.1486454965791317,
+        "max": 0.14906957820810454
+      },
+      "host_ms": {
+        "median": 0.029644444440337894,
+        "min": 0.0285555555695861,
+        "max": 0.036516161620084225
+      }
+    },
+    {
+      "name": "backward 06 MaxPool2d",
+      "stage": "backward",
+      "gpu_ms": {
+        "median": 0.8471789913948136,
+        "min": 0.8429898980892065,
+        "max": 0.8523610517232105
+      },
+      "host_ms": {
+        "median": 0.05226161616666665,
+        "min": 0.04879090909875084,
+        "max": 0.062132323228988845
+      }
+    },
+    {
+      "name": "backward 04 BatchNorm",
+      "stage": "backward",
+      "gpu_ms": {
+        "median": 1.3493527475029532,
+        "min": 1.3493320628850147,
+        "max": 1.3495285860215775
+      },
+      "host_ms": {
+        "median": 0.09534747477293348,
+        "min": 0.09284545454059785,
+        "max": 0.10210101010275736
+      }
+    },
+    {
+      "name": "backward 03 Conv2d",
+      "stage": "backward",
+      "gpu_ms": {
+        "median": 2.4480012980374424,
+        "min": 2.4279970809666795,
+        "max": 2.4547555542955495
+      },
+      "host_ms": {
+        "median": 0.09692525252766511,
+        "min": 0.09468484848763513,
+        "max": 0.11068585857201745
+      }
+    },
+    {
+      "name": "backward 01 BatchNorm",
+      "stage": "backward",
+      "gpu_ms": {
+        "median": 1.3471806085470952,
+        "min": 1.34717026744226,
+        "max": 1.347253016751222
+      },
+      "host_ms": {
+        "median": 0.09375454545658034,
+        "min": 0.09083030303225663,
+        "max": 0.10079292927443792
+      }
+    },
+    {
+      "name": "backward 00 Conv2d",
+      "stage": "backward",
+      "gpu_ms": {
+        "median": 0.6853663012234852,
+        "min": 0.6821908722020159,
+        "max": 0.6863282413193674
+      },
+      "host_ms": {
+        "median": 0.07593838384107382,
+        "min": 0.07045959595452954,
+        "max": 0.08434545454770388
+      }
+    },
+    {
+      "name": "optimizer.step",
+      "stage": "optimizer.step",
+      "gpu_ms": {
+        "median": 0.2492890494941461,
+        "min": 0.23764040433999264,
+        "max": 0.2502080009441183
+      },
+      "host_ms": {
+        "median": 0.3983616161739786,
+        "min": 0.38461111112477314,
+        "max": 0.4965323232337334
+      }
+    },
+    {
+      "name": "unattributed",
+      "stage": "unattributed",
+      "gpu_ms": {
+        "median": 0.5985440488415535,
+        "min": 0.556439725795027,
+        "max": 0.6275962865770315
+      },
+      "host_ms": {
+        "median": 0.7512232323393857,
+        "min": 0.7470606059762235,
+        "max": 0.837955555591014
+      }
+    }
+  ]
+}
