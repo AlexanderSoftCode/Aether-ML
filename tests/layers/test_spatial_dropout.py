@@ -1,5 +1,6 @@
 import tests.base_case as base_case
 from aether.layers.dropout import SpatialDropout
+from tests.layers.philox_reference import kept_elements
 
 
 class TestSpatialDropout(base_case.AetherBaseLayerTestCase):
@@ -199,5 +200,71 @@ class TestSpatialDropout(base_case.AetherBaseLayerTestCase):
         self.assertEqual(layer._clock.value, 0)
         self.assertEqual(layer._active_offset, -1)
 
+
+    # ---- GPU kernel against the reference ------------------------------------
+
+    def _pinned_layer(self, input_shape, rate):
+        """make_built_layer's seed only reaches build(), so pin the mask stream directly."""
+        layer = self.make_built_layer(SpatialDropout, input_shape=input_shape, rate=rate)
+        layer._seed_key = self.FIXED_SEED
+        return layer
+
+    def test_gpu_mask_matches_reference_per_sample_and_channel(self):
+        if not self.uses_gpu_kernel:
+            self.skipTest("Philox kernel only runs on the GPU path")
+
+        S, C = 9, 13
+        layer = self._pinned_layer((3, 3, C), 0.3)
+        layer._clock.value = 4
+        output = layer.forward(self.xp.ones((S, 3, 3, C), dtype=self.xp.float32), training=True)
+
+        expected = kept_elements(layer._seed_key, 4, S * C, layer._keep_threshold)
+        self.assertEqual((output[:, 0, 0, :] != 0).get().ravel().tolist(), expected)
+
+    def test_backward_applies_the_forward_mask_after_the_clock_advances(self):
+        layer = self._pinned_layer((2, 2, 16), 0.5)
+        shape = (4, 2, 2, 16)
+        kept = layer.forward(self.xp.ones(shape, dtype=self.xp.float32), training=True) != 0
+        layer._clock.advance()
+
+        dvalues = self.xp.arange(1, 257, dtype=self.xp.float32).reshape(shape)
+        dinputs = layer.backward(dvalues)
+
+        # Hand-derived: rate 0.5 scales kept elements by exactly 2.
+        self.assertTrue(bool(self.xp.all(dinputs[kept] == dvalues[kept] * 2.0)))
+        self.assertTrue(bool(self.xp.all(dinputs[~kept] == 0.0)))
+
+    def test_output_follows_input_dtype(self):
+        for dtype in (self.xp.float16, self.xp.float32, self.xp.float64):
+            layer = self._pinned_layer((2, 2, 16), 0.5)
+            output = layer.forward(self.xp.full((4, 2, 2, 16), 1.5, dtype=dtype), training=True)
+            self.assertEqual(output.dtype, dtype)
+            self.assertTrue(bool(self.xp.all(output[output != 0] == 3.0)))
+
+    def test_eval_forward_releases_the_gpu_mask(self):
+        if not self.uses_gpu_kernel:
+            self.skipTest("the cached mask is only released on the GPU path")
+
+        inputs = self.xp.ones((2, 5, 5, 25), dtype=self.xp.float32)
+        self.layer.forward(inputs, training=True)
+        self.assertEqual(self.layer.channel_mask.shape, (2, 1, 1, 25))
+
+        self.layer.forward(inputs, training=False)
+        self.assertIsNone(self.layer.channel_mask)
+
+    def test_dropped_channels_are_zero_even_for_nan_and_inf(self):
+        xp = self.xp
+        shape = (4, 2, 2, 16)
+        layer = self._pinned_layer(shape[1:], 0.5)
+        kept = layer.forward(xp.ones(shape, dtype=xp.float32), training=True) != 0
+        self.assertTrue(bool(xp.any(kept)) and not bool(xp.all(kept)))
+
+        # Every other channel is NaN, the rest +inf, so both land in kept and dropped.
+        bad = xp.full(shape, float('inf'), dtype=xp.float32)
+        bad[..., ::2] = float('nan')
+        for result in (layer.forward(bad, training=True), layer.backward(bad)):
+            self.assertTrue(bool(xp.all(result[~kept] == 0.0)))
+            self.assertTrue(bool(xp.all(xp.isnan(result[kept]) == xp.isnan(bad[kept]))))
+            self.assertTrue(bool(xp.all(xp.isinf(result[kept]) == xp.isinf(bad[kept]))))
 
 base_case.register_test_suites(globals(), TestSpatialDropout)
