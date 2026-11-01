@@ -168,9 +168,9 @@ All figures below come from the same CNN, the same seed, the same fp16 precision
 Three paths are tested; NumPy on CPU, vectorized CuPy without custom kernels, and the fused kernel path.  
   
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/benchmark_convergence-dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/benchmark_convergence.png">
-  <img alt="Backend convergence" src="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/benchmark_convergence.png">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/benchmarks/benchmark_convergence-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/benchmarks/benchmark_convergence.png">
+  <img alt="Backend convergence" src="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/benchmarks/benchmark_convergence.png">
 </picture>
 
 ### Throughput
@@ -178,9 +178,9 @@ Three paths are tested; NumPy on CPU, vectorized CuPy without custom kernels, an
 Per training step: **4.85 ms** on the fused kernel path vs **202 ms** on vectorized CuPy on the same GPU, with **1,865 ms** for NumPy on CPU. With the GPU paths, the kernel work shows a **42x speedup against identical hardware running array operations**.
   
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/benchmark_throughput-dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/benchmark_throughput.png">
-  <img alt="Backend throughput" src="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/benchmark_throughput.png">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/benchmarks/benchmark_throughput-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/benchmarks/benchmark_throughput.png">
+  <img alt="Backend throughput" src="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/benchmarks/benchmark_throughput.png">
 </picture>
 
 ### Transient VRAM 
@@ -188,9 +188,9 @@ Per training step: **4.85 ms** on the fused kernel path vs **202 ms** on vectori
 Transient VRAM footprint over two training steps. Unfused CuPy dispatches allocate independent temporary buffers in VRAM for intermediate steps, resulting in transient spikes up to **420 MiB**. Custom fused kernels eliminate the need to create temporary buffers by executing multiple actions in the same kernel within registers and shared memory, reducing peak transient VRAM by **5.3×** (80.0 MiB peak).  
   
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/benchmark_vram-dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/benchmark_vram.png">
-  <img alt="Transient VRAM usage" src="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/benchmark_vram.png">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/benchmarks/benchmark_vram-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/benchmarks/benchmark_vram.png">
+  <img alt="Transient VRAM usage" src="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/benchmarks/benchmark_vram.png">
 </picture>
 
 ---

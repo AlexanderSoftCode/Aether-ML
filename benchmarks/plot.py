@@ -5,7 +5,7 @@ Run from the repo root, with matplotlib installed (the package doesn't depend on
 
     python3 benchmarks/plot.py v1.1.0 v1.2.0
 
-Writes light and dark PNGs to notebooks/assets:
+Writes light and dark PNGs to notebooks/assets/benchmarks:
 
     benchmark_throughput, benchmark_convergence, benchmark_vram   from <new>/
     benchmark_release, old against new per GPU                    from both versions
@@ -27,7 +27,7 @@ import numpy as np
 from matplotlib.ticker import FuncFormatter, LogLocator
 
 HISTORY = Path(__file__).resolve().parent / "history"
-ASSETS = Path(__file__).resolve().parents[1] / "notebooks" / "assets"
+ASSETS = Path(__file__).resolve().parents[1] / "notebooks" / "assets" / "benchmarks"
 
 plt.rcParams["font.family"] = ["DejaVu Sans"]
 plt.rcParams["axes.unicode_minus"] = False
