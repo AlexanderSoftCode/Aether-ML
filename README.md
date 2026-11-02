@@ -27,9 +27,11 @@ Aether-ML is an intentionally ground-up project born knowing nothing about machi
 
 **Kernels** — Hand-written CUDA and HIP kernels for every compute layer, magic-number integer division (Granlund & Montgomery) for on-device index decomposition, and numerical stability guards on optimizer moment denominators, standard scaling, and loss terms
 
+**Kernel Fusion** — Automatic graph-level operator fusion on CuPy combining BatchNorm and ReLU/LeakyReLU on both forward and backward passes.
+
 **Training** — AdamW with decoupled weight decay (Loshchilov & Hutter), L1 and L2 regularization executed inside the optimizer kernel, label smoothing within categorical cross entropy (Guo et al.), batch shuffling, in-training validation, and throttled progress reporting, and mixed precision via `set_precision`, which casts most layers while forcing FP32 in the optimizer, Softmax, and BatchNorm for numerical stability.  
 
-**Serialization** — `.aether` bundles pairing a JSON architecture manifest with `safetensors` weights, with no pickle anywhere in the load path, so an untrusted checkpoint cannot execute code. Preprocessor state is captured in the manifest, so a loaded model normalizes its own inputs
+**Serialization** — `.aether` bundles pair a JSON manifest with `safetensors` weights (zero pickle). The manifest records the layer graph, the loss, optimizer, and accuracy configs, the precision policy, the seed, and the fitted preprocessing pipeline, so `Model.load` returns a finalized model that accepts raw inputs straight away. Loading ever resolves for Aether's own classes, holds unexpected zip bombs, or carrying weights where shape, name, or dtype fail when they don't match the manifest.
 
 **Preprocessing** — `Compose` pipelines with `Rescale`, `StandardScaler`, and `ToTensor`
 
@@ -114,7 +116,7 @@ model.configure(
     preprocessor=feature_pipeline   # Optional, see examples/cifar10/
 )
 model.to(TARGET_DEVICE)
-model.finalize(input_shape=X_train.shape[1:])
+model.finalize(input_shape=X_train.shape[1:], fuse_kernels=True)
 
 model.train(X=X_train, 
     y=y_train, 
@@ -162,10 +164,11 @@ One exception is deliberate. The `training` flag stays a plain runtime boolean, 
 
 ## Benchmarks
 
-All figures below come from the same CNN, the same seed, the same fp16 precision policy, and the same hardware (AMD RX 9070 XT, Intel Core Ultra 265K). The dispatch path differs, and with it Conv2d's precision: only the fused path can run Conv2d in fp16, so the other two compute it in fp32. The scripts and saved results are in [`benchmarks/`](benchmarks/README.md).
+All figures train the same CNN on CIFAR-10 with the same seed and fp16 precision policy, on an AMD RX 9070 XT and Intel Core Ultra 265K unless noted. The dispatch path differs, and with it Conv2d's precision: only the fused path can run Conv2d in fp16, so the other two compute it in fp32. The scripts and saved results are in [`benchmarks/`](benchmarks/README.md).
 
 ### Convergence
-Three paths are tested; NumPy on CPU, vectorized CuPy without custom kernels, and the fused kernel path.  
+
+The solid lines are the desktop: NumPy on the CPU, then vectorized CuPy and fused kernels on the 9070 XT. The dashed line is the fused path on an RTX 3050 Mobile. The laptop GPU reaches a loss of 1.8 about 4× later than the 9070 XT (1.5 s vs 0.37 s), but still 10× sooner than the 9070 XT without custom kernels (15.4 s).  
   
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/benchmarks/benchmark_convergence-dark.png">
@@ -185,7 +188,7 @@ Per training step: **4.85 ms** on the fused kernel path vs **202 ms** on vectori
 
 ### Transient VRAM 
 
-Transient VRAM footprint over two training steps. Unfused CuPy dispatches allocate independent temporary buffers in VRAM for intermediate steps, resulting in transient spikes up to **420 MiB**. Custom fused kernels eliminate the need to create temporary buffers by executing multiple actions in the same kernel within registers and shared memory, reducing peak transient VRAM by **5.3×** (80.0 MiB peak).  
+Transient VRAM footprint over two training steps. Unfused CuPy dispatches allocate independent temporary buffers in VRAM for intermediate steps, resulting in transient spikes up to **420 MiB**. Custom fused kernels eliminate the need to create temporary buffers by executing multiple actions in the same kernel within registers and shared memory, reducing peak transient VRAM by **5.3×** (80.0 MiB peak). The RTX 3050 Mobile trace has the same shape and peak, within 0.07 MiB, so it isn't plotted separately.  
   
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/AlexanderSoftCode/Aether-ML/main/notebooks/assets/benchmarks/benchmark_vram-dark.png">
@@ -245,8 +248,6 @@ A single line tests **both** the **NumPy** and **CuPy** backends. Some of the co
 ## Future Work
 
 * [ ] **Transformer Block** — Implementation of a general transformer block and **ViT** transformer block into the framework, with the fallback vectorized path as well as a fused kernel path. 
-* [ ] **Fused Forward Pass Epilogue Support** — Currently, layers such as *ReLU* and *LeakyReLU* are not fused together at the end of the compute layers epilogue (e.g. *Conv2d*, *Dense*), combining the two layers into a single kernel pass promotes faster forward passes.
-* [ ] **Custom Linear Kernel** — Support for a simple GEMM kernel utilizing matrix/tensor cores from the AMD/NVIDIA GPUs, plan is to fuse the dot product as well as the bias add here, and have it compatible with both dense and transformer block.
 * [ ] **Data augmentation pipeline** — passed into `configure`, applied per mini-batch (Gaussian blur, flips, rotations, inversion)
 
 ---
