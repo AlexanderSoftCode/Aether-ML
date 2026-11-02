@@ -55,6 +55,7 @@ THEMES = {
         "series": {"cupy-fused": "#2a9d5c", "cupy-fallback": "#2a78d6", "numpy-cpu": "#4a3aa7",
                    "other-gpu-fused": "#5da938"},
         "stages": {"forward": "#2a9d5c", "backward": "#16643a"},
+        "torch": "#ee4c2c",
     },
     "dark": {
         "suffix": "-dark",
@@ -69,6 +70,7 @@ THEMES = {
         "series": {"cupy-fused": "#3dbb74", "cupy-fallback": "#3987e5", "numpy-cpu": "#9085e9",
                    "other-gpu-fused": "#81d262"},
         "stages": {"forward": "#3dbb74", "backward": "#9fe8bd"},
+        "torch": "#f0664a",
     },
 }
 STAGE_LABELS = {"forward": "Forward", "backward": "Backward", "rest": "Everything else"}
@@ -404,7 +406,7 @@ def release_panel(ax, old_version, new_version, old, new, reference, gain, theme
     if reference:
         ms, new_ms = reference["baseline_ms"]["median"], new["baseline_ms"]["median"]
         ratio = ms / new_ms
-        ax.barh(0, ms, height=0.42, color=theme["secondary"])
+        ax.barh(0, ms, height=0.42, color=theme["torch"])
         ax.annotate(f"{fmt_ms(ms)} ms/step  ·  {new_version} is "
                     f"{fmt_multiple(ratio if ratio >= 1 else 1 / ratio)} "
                     f"{'faster' if ratio >= 1 else 'slower'}",
@@ -426,7 +428,7 @@ def figure_release(old_version, new_version, runs, theme):
     reference = next((ref for _, _, ref in runs if ref), None)
 
     # Everything is laid out in inches, so the panels keep their size as GPUs are added.
-    row_height, gap, top, bottom = 0.425, 0.62, 1.32, 0.60
+    row_height, gap, top, bottom = 0.363, 0.50, 1.30, 0.52
     panels = [row_height * (3 if reference else 2) for _, _, reference in runs]
     height = top + bottom + sum(panels) + gap * (len(runs) - 1)
     fig = new_figure(
