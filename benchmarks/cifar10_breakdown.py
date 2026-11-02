@@ -26,39 +26,25 @@ without editing this file. Calls it no longer makes drop out as removed rows; wo
 it does outside the wrapped methods grows "unattributed".
 """
 import argparse
-import datetime
 import json
-import platform
-import statistics
-import subprocess
-import sys
 import time
 from pathlib import Path
 
 import cupy as cp
-import numpy as np
+from common import (
+    BASELINE_STEPS,
+    BATCH_SIZE,
+    COMPUTE_DTYPE,
+    WARMUP_STEPS,
+    base_meta,
+    load_train,
+    spread,
+)
 
 import aether as ae
 import aether.config as config
 
-TRAIN_DIR = Path("data") / "cifar-10" / "cifar-10_train.npz"
-
-BATCH_SIZE = 256
-COMPUTE_DTYPE = "float16"
-WARMUP_STEPS = 20
-BASELINE_STEPS = 128
 BREAKDOWN_STEPS = 100
-
-
-def load_train():
-    """CIFAR-10 training images and labels, as host arrays."""
-    if not TRAIN_DIR.exists():
-        sys.exit(
-            f"[aether] {TRAIN_DIR} not found. Run from the repo root after creating it "
-            "with examples/cifar10/cifar-setup.ipynb."
-        )
-    with np.load(TRAIN_DIR, allow_pickle=False) as data:
-        return data["X_train"], data["y_train"]
 
 
 def build_model(X_train, device="cupy"):
@@ -227,38 +213,12 @@ def breakdown(model, transforms, X_train, y_train):
     return result
 
 
-def spread(samples):
-    return {"median": statistics.median(samples), "min": min(samples), "max": max(samples)}
-
-
-def git_state():
-    """(commit, dirty) of the checkout aether was imported from, or (None, None)
-    outside git, so a run against a worktree of an older tag records that tag."""
-    source = Path(ae.__file__).parent
-    try:
-        commit = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
-                                text=True, check=True, cwd=source).stdout.strip()
-        status = subprocess.run(["git", "status", "--porcelain"], capture_output=True,
-                                text=True, check=True, cwd=source).stdout
-    except (OSError, subprocess.CalledProcessError):
-        return None, None
-    return commit, bool(status.strip())
-
-
 def run_meta():
     """What a result file needs to say about where it was measured."""
-    commit, dirty = git_state()
     return {
-        "commit": commit,
-        "dirty": dirty,
-        "date": datetime.datetime.now().isoformat(timespec="seconds"),
+        **base_meta(Path(ae.__file__).parent),
         "gpu": cp.cuda.runtime.getDeviceProperties(0)["name"].decode(),
         "cupy": cp.__version__,
-        "python": platform.python_version(),
-        "batch_size": BATCH_SIZE,
-        "compute_dtype": COMPUTE_DTYPE,
-        "warmup_steps": WARMUP_STEPS,
-        "baseline_steps": BASELINE_STEPS,
     }
 
 

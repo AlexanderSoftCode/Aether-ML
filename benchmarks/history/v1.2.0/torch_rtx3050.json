@@ -1,0 +1,22 @@
+{
+  "meta": {
+    "commit": "29c71e361d34f53efa34a84bf4551a9ac4d74ff7",
+    "dirty": true,
+    "date": "2026-11-01T21:48:18",
+    "python": "3.14.10",
+    "batch_size": 256,
+    "compute_dtype": "float16",
+    "warmup_steps": 20,
+    "baseline_steps": 128,
+    "gpu": "NVIDIA GeForce RTX 3050 6GB Laptop GPU",
+    "torch": "2.12.0+cu132",
+    "mode": "compiled",
+    "repeats": 3,
+    "warmup_s": 86.26663080000435
+  },
+  "baseline_ms": {
+    "median": 16.8658515625566,
+    "min": 16.82847109384511,
+    "max": 16.882614843780175
+  }
+}

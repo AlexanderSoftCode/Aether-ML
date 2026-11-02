@@ -11,7 +11,8 @@ Writes light and dark PNGs to notebooks/assets/benchmarks:
     benchmark_release, old against new per GPU                    from both versions
 
 Each GPU's release panel has its own scale and compares only with itself, so every panel
-is a true A/B on one machine. On the convergence figure, any paths_fused_<gpu>.json adds
+is a true A/B on one machine. A torch_<gpu>.json in <new>/ adds PyTorch's bar to that
+GPU's panel; its bar is the wall-clock ms/step, the one number it has. On the convergence figure, any paths_fused_<gpu>.json adds
 that GPU's fused path as a dashed curve; the title and equal-loss line stay on paths.json.
 """
 import argparse
@@ -54,6 +55,7 @@ THEMES = {
         "series": {"cupy-fused": "#2a9d5c", "cupy-fallback": "#2a78d6", "numpy-cpu": "#4a3aa7",
                    "other-gpu-fused": "#5da938"},
         "stages": {"forward": "#2a9d5c", "backward": "#16643a"},
+        "torch": "#ee4c2c",
     },
     "dark": {
         "suffix": "-dark",
@@ -68,6 +70,7 @@ THEMES = {
         "series": {"cupy-fused": "#3dbb74", "cupy-fallback": "#3987e5", "numpy-cpu": "#9085e9",
                    "other-gpu-fused": "#81d262"},
         "stages": {"forward": "#3dbb74", "backward": "#9fe8bd"},
+        "torch": "#f0664a",
     },
 }
 STAGE_LABELS = {"forward": "Forward", "backward": "Backward", "rest": "Everything else"}
@@ -378,40 +381,56 @@ def stage_ms(breakdown):
     return stages
 
 
-def release_panel(ax, old_version, new_version, old, new, gain, theme):
+def release_panel(ax, old_version, new_version, old, new, reference, gain, theme):
     # The remainder is small and carries no story, so it stays neutral.
     colors = {**theme["stages"], "rest": theme["muted"]}
+    top = 2 if reference else 1
     ax.grid(axis="x", color=theme["grid"], linewidth=1.0)
     ax.spines["left"].set_visible(False)
     ax.set_title(new["meta"]["gpu"], loc="left", fontsize=SZ_CAPTION, fontweight="bold",
                  color=theme["primary"], pad=5)
-    for row, breakdown in ((1, old), (0, new)):
+    for row, breakdown in ((top, old), (top - 1, new)):
         left = 0.0
         for stage, ms in stage_ms(breakdown).items():
             ax.barh(row, ms, left=left, height=0.42, color=colors[stage],
                     edgecolor=theme["surface"], linewidth=1.0, label=STAGE_LABELS[stage])
             left += ms
         label = f"{fmt_ms(breakdown['baseline_ms']['median'])} ms/step"
-        if row == 0:
+        if row == top - 1:
             label += f"  ·  {fmt_multiple(gain)} faster"
         ax.annotate(label, xy=(left, row), xytext=(7, 0), textcoords="offset points",
                     va="center", fontsize=SZ_AXIS, color=theme["primary"],
-                    fontweight="bold" if row == 0 else "normal")
-    ax.set_yticks([1, 0], [old_version, new_version], color=theme["primary"])
-    ax.set_ylim(-0.5, 1.5)
-    ax.set_xlim(0, sum(stage_ms(old).values()) * 1.2)
+                    fontweight="bold" if row == top - 1 else "normal")
+    ticks = [(top, old_version), (top - 1, new_version)]
+    longest = sum(stage_ms(old).values())
+    if reference:
+        ms, new_ms = reference["baseline_ms"]["median"], new["baseline_ms"]["median"]
+        ratio = ms / new_ms
+        ax.barh(0, ms, height=0.42, color=theme["torch"])
+        ax.annotate(f"{fmt_ms(ms)} ms/step  ·  {new_version} is "
+                    f"{fmt_multiple(ratio if ratio >= 1 else 1 / ratio)} "
+                    f"{'faster' if ratio >= 1 else 'slower'}",
+                    xy=(ms, 0), xytext=(7, 0), textcoords="offset points", va="center",
+                    fontsize=SZ_AXIS, color=theme["primary"])
+        ticks.append((0, "PyTorch"))
+        longest = max(longest, ms)
+    ax.set_yticks(*zip(*ticks), color=theme["primary"])
+    ax.set_ylim(-0.5, top + 0.5)
+    ax.set_xlim(0, longest * 1.2)
     ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g} ms"))
 
 
 def figure_release(old_version, new_version, runs, theme):
-    gains = [old["baseline_ms"]["median"] / new["baseline_ms"]["median"] for old, new in runs]
+    gains = [old["baseline_ms"]["median"] / new["baseline_ms"]["median"] for old, new, _ in runs]
     headline = (f"{min(gains):.1f}–{max(gains):.1f}{TIMES}" if len(gains) > 1
                 else fmt_multiple(gains[0]))
-    first_old, first_new = runs[0]
+    first_old, first_new, _ = runs[0]
+    reference = next((ref for _, _, ref in runs if ref), None)
 
     # Everything is laid out in inches, so the panels keep their size as GPUs are added.
-    panel, gap, top, bottom = 0.85, 0.62, 1.32, 0.60
-    height = top + bottom + panel * len(runs) + gap * (len(runs) - 1)
+    row_height, gap, top, bottom = 0.363, 0.50, 1.30, 0.52
+    panels = [row_height * (3 if reference else 2) for _, _, reference in runs]
+    height = top + bottom + sum(panels) + gap * (len(runs) - 1)
     fig = new_figure(
         theme,
         f"{new_version} trains {headline} faster than {old_version}",
@@ -419,13 +438,15 @@ def figure_release(old_version, new_version, runs, theme):
         + (" Each GPU has its own scale." if len(runs) > 1 else ""),
         f"CIFAR-10 · batch {first_new['meta']['batch_size']} · seed {SEED} · "
         f"median of {first_new['meta']['repeats']} runs · "
-        f"{first_old['meta']['commit'][:7]} vs {first_new['meta']['commit'][:7]}",
+        f"{first_old['meta']['commit'][:7]} vs {first_new['meta']['commit'][:7]}"
+        + (f" · PyTorch {reference['meta']['torch'].split('+')[0]} compiled, fp16 autocast"
+           if reference else ""),
         height=height,
     )
-    for i, ((old, new), gain) in enumerate(zip(runs, gains)):
-        y = bottom + (panel + gap) * (len(runs) - 1 - i)
-        ax = new_axes(fig, [0.10, y / height, 0.86, panel / height], theme)
-        release_panel(ax, old_version, new_version, old, new, gain, theme)
+    for i, ((old, new, reference), gain) in enumerate(zip(runs, gains)):
+        y = height - top - sum(panels[:i + 1]) - gap * i
+        ax = new_axes(fig, [0.10, y / height, 0.86, panels[i] / height], theme)
+        release_panel(ax, old_version, new_version, old, new, reference, gain, theme)
 
     handles, labels = ax.get_legend_handles_labels()
     fig.legend(handles[:3], labels[:3], loc="upper left", bbox_to_anchor=(0.03, 1 - 0.76 / height),
@@ -435,17 +456,20 @@ def figure_release(old_version, new_version, runs, theme):
 
 
 def load_release_runs(old_version, new_version):
-    """(old, new) breakdowns for every GPU, fastest first. All runs must share one pair
-    of commits, or the footer and the title would be describing different code."""
+    """(old, new, torch) for every GPU, fastest first; torch is None on a GPU without a
+    torch_<gpu>.json. All runs must share one pair of commits, or the footer and the title
+    would be describing different code."""
     runs = []
     for new_path in sorted((HISTORY / new_version).glob("breakdown_*.json")):
         old_path = HISTORY / old_version / new_path.name
         if not old_path.exists():
             raise FileNotFoundError(f"[aether] {old_path} is missing; {new_path} has no baseline.")
-        runs.append((json.loads(old_path.read_text()), json.loads(new_path.read_text())))
+        torch_path = new_path.with_name(new_path.name.replace("breakdown_", "torch_", 1))
+        runs.append((json.loads(old_path.read_text()), json.loads(new_path.read_text()),
+                     json.loads(torch_path.read_text()) if torch_path.exists() else None))
     if not runs:
         raise FileNotFoundError(f"[aether] No breakdown_*.json in {HISTORY / new_version}.")
-    commits = {(old["meta"]["commit"], new["meta"]["commit"]) for old, new in runs}
+    commits = {(old["meta"]["commit"], new["meta"]["commit"]) for old, new, _ in runs}
     if len(commits) > 1:
         raise ValueError(f"[aether] Release runs measured different commits: {sorted(commits)}.")
     return sorted(runs, key=lambda run: run[1]["baseline_ms"]["median"])
