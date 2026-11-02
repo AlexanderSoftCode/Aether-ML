@@ -1,0 +1,22 @@
+{
+  "meta": {
+    "commit": "fc06f99038bca4e8c77283e548aeb97d323ccd1d",
+    "dirty": true,
+    "date": "2026-11-02T02:13:35",
+    "python": "3.14.4",
+    "batch_size": 256,
+    "compute_dtype": "float16",
+    "warmup_steps": 20,
+    "baseline_steps": 128,
+    "gpu": "AMD Radeon RX 9070 XT",
+    "torch": "2.12.0+rocm7.14.1",
+    "mode": "compiled",
+    "repeats": 3,
+    "warmup_s": 3.1427786790000027
+  },
+  "baseline_ms": {
+    "median": 7.6043785781223505,
+    "min": 7.583219632813609,
+    "max": 7.621538335932598
+  }
+}
